@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "perf-regress"
+version = "0.1.0"
+description = "性能基准与回归检测服务：基准采集、统计显著性与回归归因"
+readme = "README.md"
+requires-python = ">=3.8"
+
+[project.scripts]
+perf-regress = "perf_regress.cli:entry"
+
+[tool.setuptools.packages.find]
+include = ["perf_regress*"]
