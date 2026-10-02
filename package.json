@@ -1,0 +1,13 @@
+{
+  "name": "perf-regress",
+  "version": "0.1.0",
+  "description": "性能基准与回归检测服务：基准采集、统计显著性与回归归因",
+  "private": true,
+  "bin": {
+    "perf-regress": "bin/perf-regress.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}
