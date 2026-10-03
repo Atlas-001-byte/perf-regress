@@ -8,8 +8,8 @@
 
 ## 状态
 
-已实现：基准采集子命令 `perf-regress collect` 与比较子命令 `perf-regress compare`
-（零依赖 Node.js）。
+已实现：基准采集子命令 `perf-regress collect`、比较子命令 `perf-regress compare`
+与套件比较子命令 `perf-regress compare-suite`（零依赖 Node.js）。
 
 ## 用法
 
@@ -27,6 +27,12 @@ node bin/perf-regress.js compare \
   --baseline <基线.json> \
   --candidate <候选.json> \
   --output <比较结果.json> \
+  [--alpha <显著性水平>] \
+  [--min-change-percent <阈值百分比>]
+
+node bin/perf-regress.js compare-suite \
+  --manifest <manifest.json> \
+  --output <套件结果.json> \
   [--alpha <显著性水平>] \
   [--min-change-percent <阈值百分比>]
 ```
@@ -111,6 +117,53 @@ warmup 阶段的 nonzero_exit/timeout 只记录到 `errors`，不影响退出码
   `dominant_factor` 取三者中最大正向项（`central_tendency` / `tail_latency` /
   `variability`），平手按此顺序，百分比为 `null` 视为无穷大正向，
   无正向值为 `none`。
+
+## compare-suite 子命令
+
+按 manifest 批量比较多对 collect JSON：每对输入按 compare 口径重算并做
+Benjamini–Hochberg（BH）多重比较校正，输出逐 case 结果、套件汇总与套件归因。
+
+- `--manifest`：套件 manifest JSON，必填，非空。
+- `--output`：套件结果 JSON 输出文件，必填，非空。
+- `--alpha`：显著性水平，`0 < alpha < 1`，缺省 `0.05`。
+- `--min-change-percent`：回归/改进判定的变化幅度阈值（百分比），`>= 0`，缺省 `5`。
+- 参数同时支持 `--key value` 与 `--key=value` 两种写法。
+
+### manifest 格式（UTF-8 JSON）
+
+顶层为对象，`cases` 为非空数组，每项必须含：
+
+- `name`：非空字符串，在 cases 中唯一；
+- `baseline` / `candidate`：基线/候选 collect JSON 路径，非空字符串；
+  相对路径按 manifest 文件所在目录解析。
+
+manifest、case、字段、路径、文件或输入样本不合上述口径时，stderr 输出一条原因、
+退出码 2，不创建或改写 `--output`；每个 case 的样本校验沿用 compare
+（每侧至少 2 个有效样本，同场景 `command` 一致）。成功退出码 0；
+`--output` 写入失败退出码 4。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`cases`、`suite_summary`、`suite_attribution`。
+
+- `cases`：按 manifest 顺序排列，每项在 compare 输出口径上增加
+  `adjusted_p_value`，字段为 `name`、`command`、`baseline_summary`、
+  `candidate_summary`、`delta`、`welch`、`adjusted_p_value`、`decision`、
+  `attribution`。
+  - 统计量、Welch（含零方差与基线均值 0 的退化情形）、归因口径与 compare 完全一致；
+  - `adjusted_p_value`：m 个原始 p 值升序后记 p_(1)<=...<=p_(m)，按
+    q_(i) = min(1, min over j>=i (m·p_(j)/j)) 计算后映回原序，保留六位小数；
+  - `decision`：沿用 compare 四类值，但以 `adjusted_p_value <= alpha` 判显著，
+    再按 mean 百分比与阈值选择。
+- `suite_summary`：含 `total` 与四类计数（`regression`、`improvement`、
+  `no_material_change`、`not_significant`）及 `suite_decision`；
+  `suite_decision` 按优先级取 case decision：
+  `regression` > `improvement` > `no_material_change` > `not_significant`。
+- `suite_attribution`：`central_tendency_percent`、`tail_latency_percent`、
+  `variability_percent` 取各 case 对应百分比（compare 三个字段）的中位数，
+  `null` 按正无穷参与比较，中位数为正无穷时写 `null`；
+  `dominant_factor` 按 compare 归因顺序取三个中位数中的最大正值，
+  平手按该顺序，无正值为 `none`。
 
 ## 约定
 
