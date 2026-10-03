@@ -8,8 +8,8 @@
 
 ## 状态
 
-已实现：基准采集子命令 `perf-regress collect` 与比较子命令 `perf-regress compare`
-（零依赖 Node.js）。
+已实现：基准采集子命令 `perf-regress collect`、比较子命令 `perf-regress compare`
+与套件比较子命令 `perf-regress compare-suite`（零依赖 Node.js）。
 
 ## 用法
 
@@ -27,6 +27,12 @@ node bin/perf-regress.js compare \
   --baseline <基线.json> \
   --candidate <候选.json> \
   --output <比较结果.json> \
+  [--alpha <显著性水平>] \
+  [--min-change-percent <阈值百分比>]
+
+node bin/perf-regress.js compare-suite \
+  --manifest <清单.json> \
+  --output <套件结果.json> \
   [--alpha <显著性水平>] \
   [--min-change-percent <阈值百分比>]
 ```
@@ -111,6 +117,48 @@ warmup 阶段的 nonzero_exit/timeout 只记录到 `errors`，不影响退出码
   `dominant_factor` 取三者中最大正向项（`central_tendency` / `tail_latency` /
   `variability`），平手按此顺序，百分比为 `null` 视为无穷大正向，
   无正向值为 `none`。
+
+## compare-suite 子命令
+
+按 manifest 批量执行 compare 口径的比较，输出逐 case 结果（含 BH 校正的
+`adjusted_p_value`）与套件级汇总、归因。
+
+- `--manifest`：套件清单 JSON（UTF-8 对象），必填。
+- `--output`：套件结果 JSON 输出文件，必填。
+- `--alpha`：显著性水平，`0 < alpha < 1`，缺省 `0.05`。
+- `--min-change-percent`：回归/改进判定阈值（百分比），`>= 0`，缺省 `5`。
+- 参数支持 `--key value` 与 `--key=value` 两种形式。
+
+manifest 格式：顶层对象含非空 `cases` 数组；每项含非空且唯一的 `name`、
+非空的 `baseline` 与 `candidate`（collect JSON 路径，相对路径按 manifest
+所在目录解析）。样本校验沿用 compare：每侧有效样本至少 2 个，
+同一 case 两份输入的 `command` 须一致。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`cases`、`suite_summary`、`suite_attribution`。
+
+- `cases`：按 manifest 顺序，每项含 `name`、`command`、compare 的六项输出
+  （按 compare 口径重算）以及 `adjusted_p_value`。
+  - `adjusted_p_value`：对 m 个 `p_value` 升序做 Benjamini-Hochberg 校正，
+    `q_i = min(1, min over j>=i (m * p_j / j))`，映回原序，保留六位小数。
+  - `decision`：四类值同 compare，但显著性以 `adjusted_p_value <= alpha` 判定，
+    再按 mean 百分比与阈值选择；零方差与基线均值为 0 的口径同 compare。
+- `suite_summary`：`total`、四类计数（`regression` / `improvement` /
+  `no_material_change` / `not_significant`）与 `suite_decision`；
+  `suite_decision` 按 regression、improvement、no_material_change 优先，
+  否则为 `not_significant`。
+- `suite_attribution`：对 compare 三个归因百分比字段逐字段取各 case 中位数
+  （`null` 按正无穷参与比较，中位数为正无穷时写回 `null`）；
+  `dominant_factor` 按 compare 归因顺序取最大正值，无正值为 `none`。
+
+### 退出码
+
+| 码 | 含义 |
+|----|------|
+| 0 | 成功 |
+| 2 | manifest、case、字段、路径、文件、样本、command 或参数不合口径（stderr 一条原因，不创建或改写 output） |
+| 4 | output 写入失败 |
 
 ## 约定
 
