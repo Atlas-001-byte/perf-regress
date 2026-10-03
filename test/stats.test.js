@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { computeSummary } = require('../lib/stats');
+const { computeSummary, welchTest } = require('../lib/stats');
 const { parseArgs } = require('../lib/collect');
 
 test('computeSummary: 单样本', () => {
@@ -57,6 +57,28 @@ test('computeSummary: 浮点保留六位小数', () => {
     const decimals = String(s[key]).split('.')[1] || '';
     assert.ok(decimals.length <= 6);
   }
+});
+
+test('welchTest: 已知取值（t=3.674235, df=4, 双侧 p=0.021312）', () => {
+  const w = welchTest([1, 2, 3], [4, 5, 6]);
+  assert.deepEqual(w, { t_statistic: 3.674235, degrees_of_freedom: 4, p_value: 0.021312 });
+});
+
+test('welchTest: 零方差相同均值 -> {0, null, 1}', () => {
+  assert.deepEqual(welchTest([5, 5, 5], [5, 5]),
+    { t_statistic: 0, degrees_of_freedom: null, p_value: 1 });
+});
+
+test('welchTest: 零方差不同均值 -> {null, null, 0}', () => {
+  assert.deepEqual(welchTest([5, 5], [7, 7, 7]),
+    { t_statistic: null, degrees_of_freedom: null, p_value: 0 });
+});
+
+test('welchTest: 单侧零方差仍可计算', () => {
+  const w = welchTest([100, 100, 100], [100, 110, 120]);
+  assert.equal(typeof w.t_statistic, 'number');
+  assert.equal(typeof w.degrees_of_freedom, 'number');
+  assert.ok(w.p_value > 0 && w.p_value < 1);
 });
 
 test('parseArgs: --key=value 与 --key value 混用', () => {
