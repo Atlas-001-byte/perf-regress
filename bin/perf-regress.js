@@ -2,25 +2,36 @@
 'use strict';
 
 const { collect, EXIT_USAGE } = require('../lib/collect');
+const { compare } = require('../lib/compare');
 
-const USAGE = `Usage: perf-regress collect --command <cmd> --runs <n> --warmup <n> \
---timeout-ms <ms> --output <path>
+const USAGE = `Usage: perf-regress <子命令> [选项]
 
-顺序执行目标命令进行基准采集，结果以 UTF-8 JSON 写入 --output。
+子命令：
+  collect   顺序执行目标命令进行基准采集，结果以 UTF-8 JSON 写入 --output
+  compare   比较两份 collect JSON，输出显著性、回归判定与变化归因
 
-选项：
+collect 选项：
   --command <cmd>     被测命令（通过 /bin/sh -c 执行），必填
   --runs <n>          计入统计的执行次数，>= 1，必填
   --warmup <n>        预热次数，>= 0，缺省 0
   --timeout-ms <ms>   单次执行超时（毫秒），>= 1，必填
   --output <path>     唯一 JSON 输出文件，必填
 
+compare 选项：
+  --baseline <path>           基线 collect JSON，必填
+  --candidate <path>          候选 collect JSON，必填
+  --output <path>             比较结果 JSON 输出文件，必填
+  --alpha <a>                 显著性水平，0 < a < 1，缺省 0.05
+  --min-change-percent <p>    回归/改进判定阈值（百分比），>= 0，缺省 5
+
 退出码：
-  0  全部成功
-  2  参数错误或进程无法启动（不创建或改写 output）
-  3  measure 阶段存在被跳过的异常（仍写 output）
+  0  成功
+  2  参数或输入无效（不创建或改写 output）
+  3  collect: measure 阶段存在被跳过的异常（仍写 output）
   4  output 写入失败
 `;
+
+const SUBCOMMANDS = { collect, compare };
 
 async function main() {
   const [subcommand, ...rest] = process.argv.slice(2);
@@ -30,7 +41,8 @@ async function main() {
     process.exit(0);
   }
 
-  if (subcommand !== 'collect') {
+  const run = SUBCOMMANDS[subcommand];
+  if (run === undefined) {
     process.stderr.write(`perf-regress: 未知子命令: ${subcommand}\n\n${USAGE}`);
     process.exit(EXIT_USAGE);
   }
@@ -40,7 +52,7 @@ async function main() {
     process.exit(0);
   }
 
-  const code = await collect(rest);
+  const code = await run(rest);
   process.exit(code);
 }
 
