@@ -10,7 +10,8 @@
 
 已实现：基准采集子命令 `perf-regress collect`、套件批量采集子命令
 `perf-regress collect-suite`、比较子命令 `perf-regress compare`
-与套件比较子命令 `perf-regress compare-suite`（零依赖 Node.js）。
+与套件比较子命令 `perf-regress compare-suite`、交错 A/B 采集比较子命令
+`perf-regress ab`（零依赖 Node.js）。
 
 ## 用法
 
@@ -38,6 +39,16 @@ node bin/perf-regress.js compare \
 node bin/perf-regress.js compare-suite \
   --manifest <manifest.json> \
   --output <套件结果.json> \
+  [--alpha <显著性水平>] \
+  [--min-change-percent <阈值百分比>]
+
+node bin/perf-regress.js ab \
+  --baseline-command '<基线命令>' \
+  --candidate-command '<候选命令>' \
+  --runs <统计次数> \
+  --warmup <预热次数> \
+  --timeout-ms <单次超时毫秒> \
+  --output <结果.json> \
   [--alpha <显著性水平>] \
   [--min-change-percent <阈值百分比>]
 ```
@@ -220,6 +231,44 @@ manifest、case、字段、路径、文件或输入样本不合上述口径时�
   `null` 按正无穷参与比较，中位数为正无穷时写 `null`；
   `dominant_factor` 按 compare 归因顺序取三个中位数中的最大正值，
   平手按该顺序，无正值为 `none`。
+
+## ab 子命令
+
+交错 A/B 基准采集与即时比较：基线和候选在同批交替测量，先完成全部预热再
+测量，预热和测量按轮次交错，每轮先 baseline 后 candidate，全程串行。
+
+- `--baseline-command` / `--candidate-command`：基线/候选命令，经系统 shell
+  执行，必填，非空。
+- `--runs`：每侧计入统计的执行次数，整数且 `>= 2`，必填。
+- `--warmup`：每侧预热次数，整数且 `>= 0`，缺省 `0`。
+- `--timeout-ms`：单次执行超时毫秒数，整数且 `>= 1`，必填。
+- `--output`：唯一 JSON 输出文件路径，必填，非空。
+- `--alpha`：显著性水平，`0 < alpha < 1`，缺省 `0.05`。
+- `--min-change-percent`：回归/改进判定阈值（百分比），`>= 0`，缺省 `5`。
+- 参数同时支持 `--key value` 与 `--key=value` 两种写法。
+
+执行与错误口径：
+
+- 每侧的单次执行、丢弃 stdout/stderr、samples/summary/errors 字段口径均与
+  collect 相同，`errors` 的 `index` 在本侧从 0 计数；
+- warmup 的 nonzero_exit/timeout 只记入 `errors`；measure 的同类错误跳过
+  该次后继续；单侧超时或失败不影响另一侧及后续轮次；
+- 进程无法启动（spawn 失败或 shell 126/127）属致命错误：stderr 报告启动失败、
+  退出码 2，不创建或改写 `--output`；
+- 参数无效时 stderr 输出一条原因、退出码 2，不创建或改写 `--output`；
+- 存在 measure 错误或任一侧有效样本（`exit_code` 为 0）少于 2 时写完整 JSON
+  并退出 3，无这些问题时退出 0；`--output` 写入失败退出码 4。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`baseline`、`candidate`、`comparison`。
+
+- `baseline` / `candidate`：各含 `command`、`runs`、`warmup`、`timeout_ms`、
+  `unit`、`samples`、`summary`、`errors`，口径与 collect 输出一致。
+- `comparison`：两侧都至少有两个 `exit_code` 为 0 的样本时，为 compare 输出
+  口径的 `baseline_summary`、`candidate_summary`、`delta`、`welch`、
+  `decision`、`attribution`（Welch 双侧检验与现有阈值产生四类决策）；
+  否则为 `null`。
 
 ## 约定
 
