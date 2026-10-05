@@ -5,6 +5,7 @@ const { collect, EXIT_USAGE } = require('../lib/collect');
 const { collectSuite } = require('../lib/collect-suite');
 const { compare } = require('../lib/compare');
 const { compareSuite } = require('../lib/compare-suite');
+const { ab } = require('../lib/ab');
 
 const USAGE = `Usage: perf-regress collect --command <cmd> --runs <n> --warmup <n> \
 --timeout-ms <ms> --output <path>
@@ -13,11 +14,16 @@ const USAGE = `Usage: perf-regress collect --command <cmd> --runs <n> --warmup <
 [--alpha <a>] [--min-change-percent <p>]
        perf-regress compare-suite --manifest <path> --output <path> \
 [--alpha <a>] [--min-change-percent <p>]
+       perf-regress ab --baseline-command <cmd> --candidate-command <cmd> \
+--runs <n> --warmup <n> --timeout-ms <ms> --output <path> \
+[--alpha <a>] [--min-change-percent <p>]
 
 collect：顺序执行目标命令进行基准采集，结果以 UTF-8 JSON 写入 --output。
 collect-suite：按 manifest 顺序批量采集多个基准场景，含逐 case 结果与套件汇总。
 compare：比较两份 collect JSON，输出显著性、回归判定与变化归因。
 compare-suite：按 manifest 批量比较多对 collect JSON，含 BH 校正与套件级汇总。
+ab：基线与候选同批交替测量（先全部预热再测量，每轮先 baseline 后 candidate），
+    输出两侧采集结果与即时比较。
 
 collect 选项：
   --command <cmd>     被测命令（通过 /bin/sh -c 执行），必填
@@ -43,10 +49,21 @@ compare-suite 选项：
   --alpha <a>                  显著性水平，0 < a < 1，缺省 0.05
   --min-change-percent <p>     回归/改进判定阈值（百分比），>= 0，缺省 5
 
+ab 选项：
+  --baseline-command <cmd>     基线命令（通过 /bin/sh -c 执行），必填
+  --candidate-command <cmd>    候选命令（通过 /bin/sh -c 执行），必填
+  --runs <n>                   每侧计入统计的执行次数，>= 2，必填
+  --warmup <n>                 每侧预热次数，>= 0，缺省 0
+  --timeout-ms <ms>            单次执行超时（毫秒），>= 1，必填
+  --output <path>              唯一 JSON 输出文件，必填
+  --alpha <a>                  显著性水平，0 < a < 1，缺省 0.05
+  --min-change-percent <p>     回归/改进判定阈值（百分比），>= 0，缺省 5
+
 退出码：
   0  成功
-  2  参数错误或输入无效（collect/collect-suite 含进程无法启动；不创建或改写 output）
-  3  collect/collect-suite：measure 阶段存在被跳过的异常（仍写 output）
+  2  参数错误或输入无效（collect/collect-suite/ab 含进程无法启动；不创建或改写 output）
+  3  collect/collect-suite：measure 阶段存在被跳过的异常（仍写 output）；
+     ab：存在 measure 错误或任一侧有效样本少于 2（仍写 output）
   4  output 写入失败
 `;
 
@@ -60,7 +77,8 @@ async function main() {
 
   if (subcommand !== 'collect' && subcommand !== 'collect-suite'
     && subcommand !== 'compare'
-    && subcommand !== 'compare-suite') {
+    && subcommand !== 'compare-suite'
+    && subcommand !== 'ab') {
     process.stderr.write(`perf-regress: 未知子命令: ${subcommand}\n\n${USAGE}`);
     process.exit(EXIT_USAGE);
   }
@@ -73,7 +91,8 @@ async function main() {
   const code = subcommand === 'collect' ? await collect(rest)
     : subcommand === 'collect-suite' ? await collectSuite(rest)
       : subcommand === 'compare' ? await compare(rest)
-        : await compareSuite(rest);
+        : subcommand === 'compare-suite' ? await compareSuite(rest)
+          : await ab(rest);
   process.exit(code);
 }
 
