@@ -8,7 +8,8 @@
 
 ## 状态
 
-已实现：基准采集子命令 `perf-regress collect`、比较子命令 `perf-regress compare`
+已实现：基准采集子命令 `perf-regress collect`、套件批量采集子命令
+`perf-regress collect-suite`、比较子命令 `perf-regress compare`
 与套件比较子命令 `perf-regress compare-suite`（零依赖 Node.js）。
 
 ## 用法
@@ -22,6 +23,10 @@ node bin/perf-regress.js collect \
   --warmup <预热次数> \
   --timeout-ms <单次超时毫秒> \
   --output <结果.json>
+
+node bin/perf-regress.js collect-suite \
+  --manifest <manifest.json> \
+  --output <套件采集结果.json>
 
 node bin/perf-regress.js compare \
   --baseline <基线.json> \
@@ -50,13 +55,14 @@ node bin/perf-regress.js compare-suite \
 
 | 码 | 含义 |
 |----|------|
-| 0 | 全部成功（samples 数量等于 runs） |
-| 2 | 参数无法解析/越界、command 或 output 为空、进程无法启动；不创建或改写 output |
+| 0 | 全部成功（collect：samples 数量等于 runs；collect-suite：无测量错误） |
+| 2 | 参数无法解析/越界、command/output/manifest 无效、进程无法启动；不创建或改写 output |
 | 3 | measure 阶段存在 nonzero_exit 或 timeout（仍写 JSON，出错的执行被跳过） |
 | 4 | output 写入失败 |
 
 warmup 阶段的 nonzero_exit/timeout 只记录到 `errors`，不影响退出码；
 进程无法启动按 `nonzero_exit` 处理而非 `timeout`，且属退出码 2 的致命错误。
+collect-suite 中任一 case 进程无法启动即整体退出 2，不创建或改写 output。
 
 ### 输出 JSON（UTF-8）
 
@@ -75,6 +81,56 @@ warmup 阶段的 nonzero_exit/timeout 只记录到 `errors`，不影响退出码
   - 无有效样本时 `count` 为 0，其余统计字段为 `null`。
 - `errors`：每项含 `stage`（`warmup` / `measure`）、`index`、
   `reason`（`nonzero_exit` / `timeout`）、`exit_code`（timeout 时为 `null`）。
+
+## collect-suite 子命令
+
+按 manifest 顺序批量采集多个基准场景：按 `cases` 顺序逐个采集，case 内先顺序
+执行全部 warmup 再顺序执行全部 runs，case 间不并发。超时、启动失败分类、丢弃
+stdout/stderr、samples/summary/errors 字段口径均与 collect 相同。
+
+- `--manifest`：套件 manifest JSON（UTF-8），必填，非空。
+- `--output`：套件采集结果 JSON 输出文件，必填，非空。
+- 参数同时支持 `--key value` 与 `--key=value` 两种写法。
+
+### manifest 格式（UTF-8 JSON）
+
+顶层为对象，`cases` 为非空数组，每项必须含：
+
+- `name`：非空字符串，在 cases 中唯一；
+- `command`：被测命令，经系统 shell 执行，非空字符串；
+- `runs`：整数，`>= 1`；
+- `warmup`：整数，`>= 0`；
+- `timeout_ms`：整数，`>= 1`。
+
+未知字段一律忽略。执行前完整校验：参数或清单不合上述口径时 stderr 输出一条
+原因、退出码 2，不创建或改写 `--output`。
+
+### 执行与错误口径
+
+- 退出码 0 的执行进入该 case 的 `samples`；
+- warmup 的 nonzero_exit/timeout 只记入 `errors`；
+- measure 阶段的 nonzero_exit/timeout 跳过该次并记入 `errors`，继续剩余测量；
+- 进程无法启动（spawn 失败或 shell 126/127）属致命错误：stderr 报告启动失败、
+  退出码 2，不创建或改写 `--output`；
+- 无测量错误时写文件并退出 0；存在测量错误时写完整文件并退出 3；
+  `--output` 写入失败退出码 4。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`cases`、`suite_summary`。
+
+- `cases`：按 manifest 顺序排列，每项含 `name`、`command`、`runs`、`warmup`、
+  `timeout_ms`、`unit`、`samples`、`summary`、`errors`、`status`；
+  `unit` 恒为 `"ns"`，`samples`/`summary`/`errors` 与 collect 口径一致
+  （含六位浮点与空样本 summary 口径）。
+  - `status`：该 case 无测量错误时为 `ok`，否则为 `measure_errors`
+    （仅有 warmup 错误时仍为 `ok`）。
+- `suite_summary`：含
+  - `total`：case 总数；
+  - `ok`：无测量错误的 case 数；
+  - `measure_errors`：有测量错误的 case 数；
+  - `sample_count`：所有 case 的有效样本总数；
+  - `error_count`：所有 case 的错误总数（含 warmup 错误）。
 
 ## compare 子命令
 
