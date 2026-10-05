@@ -8,7 +8,8 @@
 
 ## 状态
 
-已实现：基准采集子命令 `perf-regress collect`、比较子命令 `perf-regress compare`
+已实现：基准采集子命令 `perf-regress collect`、批量采集子命令
+`perf-regress collect-suite`、比较子命令 `perf-regress compare`
 与套件比较子命令 `perf-regress compare-suite`（零依赖 Node.js）。
 
 ## 用法
@@ -22,6 +23,10 @@ node bin/perf-regress.js collect \
   --warmup <预热次数> \
   --timeout-ms <单次超时毫秒> \
   --output <结果.json>
+
+node bin/perf-regress.js collect-suite \
+  --manifest <manifest.json> \
+  --output <套件采集结果.json>
 
 node bin/perf-regress.js compare \
   --baseline <基线.json> \
@@ -75,6 +80,55 @@ warmup 阶段的 nonzero_exit/timeout 只记录到 `errors`，不影响退出码
   - 无有效样本时 `count` 为 0，其余统计字段为 `null`。
 - `errors`：每项含 `stage`（`warmup` / `measure`）、`index`、
   `reason`（`nonzero_exit` / `timeout`）、`exit_code`（timeout 时为 `null`）。
+
+## collect-suite 子命令
+
+按 manifest 顺序批量采集多个 case：case 间不并发，case 内先顺序执行全部
+warmup、再顺序执行全部 runs。每次执行沿用 collect 的超时、启动失败分类与
+丢弃 stdout/stderr 语义；`samples`、`summary`、`errors` 的字段口径与 collect
+完全一致。
+
+- `--manifest`：套件 manifest JSON，必填，非空。
+- `--output`：套件采集结果 JSON 输出文件，必填，非空。
+- 参数同时支持 `--key value` 与 `--key=value` 两种写法。
+
+### manifest 格式（UTF-8 JSON）
+
+顶层为对象，`cases` 为非空数组，每项必须含：
+
+- `name`：非空字符串，在 cases 中唯一；
+- `command`：被测命令，经系统 shell 执行，非空字符串；
+- `runs`：计入统计的执行次数，整数且 `>= 1`；
+- `warmup`：预热次数，整数且 `>= 0`；
+- `timeout_ms`：单次执行超时毫秒数，整数且 `>= 1`。
+
+未知字段一律忽略。manifest 不是合法 JSON、顶层不是对象、cases 不是非空数组、
+任一 case 字段不合上述口径（含 name 重复）时，stderr 输出一条原因、退出码 2，
+不创建或改写 `--output`。
+
+执行语义（按 cases 顺序）：
+
+- warmup 的 nonzero_exit/timeout 只记入该 case 的 `errors`，不影响 `status`；
+- measure 的 nonzero_exit/timeout 跳过本次并记入 `errors`，继续该 case 剩余测量；
+- 任一执行进程无法启动（spawn 失败或 shell 退出码 126/127）时，stderr 报告启动
+  失败、整体退出码 2，且不创建或改写 `--output`。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`cases`、`suite_summary`。
+
+- `cases`：按 manifest 顺序排列，每项含 `name`、`command`、`runs`、`warmup`、
+  `timeout_ms`、`unit`、`samples`、`summary`、`errors`、`status`，`unit` 恒为
+  `"ns"`；其中 `samples`/`summary`/`errors` 与 collect 口径一致（含六位浮点与
+  空样本 summary 为全 `null`）。
+  - `status`：该 case 无 measure 阶段错误时为 `ok`，否则为 `measure_errors`
+    （warmup 错误不影响 status）。
+- `suite_summary`：含 `total`、`ok`、`measure_errors`、`sample_count`、
+  `error_count`，依次为 case 总数、无测量错误的 case 数、有测量错误的 case 数、
+  全部 case 有效样本总数、全部 case 错误总数。
+
+退出码：无测量错误写文件后退出 0；存在 measure 阶段错误时仍写完整文件、退出 3；
+进程无法启动退出 2（不写 output）；`--output` 写入失败退出 4。
 
 ## compare 子命令
 
