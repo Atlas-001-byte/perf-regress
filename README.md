@@ -10,8 +10,9 @@
 
 已实现：基准采集子命令 `perf-regress collect`、套件批量采集子命令
 `perf-regress collect-suite`、比较子命令 `perf-regress compare`
-与套件比较子命令 `perf-regress compare-suite`，以及交错 A/B 采集与即时比较
-子命令 `perf-regress ab`（零依赖 Node.js）。
+与套件比较子命令 `perf-regress compare-suite`，交错 A/B 采集与即时比较
+子命令 `perf-regress ab`，以及多场景交错 A/B 套件子命令
+`perf-regress ab-suite`（零依赖 Node.js）。
 
 ## 用法
 
@@ -49,6 +50,12 @@ node bin/perf-regress.js ab \
   --warmup <预热次数> \
   --timeout-ms <单次超时毫秒> \
   --output <结果.json> \
+  [--alpha <显著性水平>] \
+  [--min-change-percent <阈值百分比>]
+
+node bin/perf-regress.js ab-suite \
+  --manifest <manifest.json> \
+  --output <套件结果.json> \
   [--alpha <显著性水平>] \
   [--min-change-percent <阈值百分比>]
 ```
@@ -273,6 +280,63 @@ manifest、case、字段、路径、文件或输入样本不合上述口径时�
   口径的对象，含 `baseline_summary`、`candidate_summary`、`delta`、`welch`、
   `decision`、`attribution`（Welch 双侧检验与现有阈值产生四类决策）；
   否则为 `null`。
+
+## ab-suite 子命令
+
+多场景交错 A/B 套件：按 manifest 逐 case 执行 ab 口径的交错测量与即时比较，
+并对可比较的 case 做套件级校正与汇总。
+
+- `--manifest`：套件 manifest JSON（UTF-8），必填，非空。
+- `--output`：套件 A/B 结果 JSON 输出文件，必填，非空。
+- `--alpha`：显著性水平，`0 < alpha < 1`，缺省 `0.05`。
+- `--min-change-percent`：回归/改进判定阈值（百分比），`>= 0`，缺省 `5`。
+- 参数同时支持 `--key value` 与 `--key=value` 两种写法。
+
+### manifest 格式（UTF-8 JSON）
+
+顶层为对象，`cases` 为非空数组，每项必须含：
+
+- `name`：非空字符串，在 cases 中唯一；
+- `baseline_command` / `candidate_command`：基线/候选命令，经系统 shell
+  执行，非空字符串；
+- `runs`：整数，`>= 2`；
+- `warmup`：整数，`>= 0`；
+- `timeout_ms`：整数，`>= 1`。
+
+未知字段一律忽略。执行前完整校验：参数或 manifest 不合上述口径时 stderr
+输出一条原因、退出码 2，不创建或改写 `--output`。
+
+### 执行与错误口径
+
+- 按 manifest 顺序逐 case 串行执行，case 内沿用 ab 口径：先两侧 warmup，
+  再两侧 measure，每轮先 baseline 后 candidate，被测命令输出丢弃；
+- warmup 的 nonzero_exit/timeout 只记入该侧 `errors`；
+- measure 阶段的 nonzero_exit/timeout 跳过该次并记入 `errors`，继续剩余测量；
+- 进程无法启动（spawn 失败或 shell 126/127）属致命错误：stderr 报告启动失败、
+  退出码 2，不创建或改写 `--output`；
+- 存在 measure 错误或任一 case 任一侧有效样本（exit_code 为 0）少于 2 时，
+  写完整 JSON 并退出码 3；无这些问题时退出码 0；`--output` 写入失败退出码 4。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`cases`、`suite_summary`、`suite_attribution`。
+
+- `cases`：按 manifest 顺序排列，每项在 ab 顶层结构（`baseline`、
+  `candidate`、`comparison`，口径与 ab 输出一致）上增加
+  `name`、`adjusted_p_value`、`decision`；
+  `comparison` 为 `null` 时 `adjusted_p_value` 与 `decision` 均为 `null`，
+  否则 `adjusted_p_value` 为套件内 BH 校正后的 p 值，`decision` 以校正后
+  p 值与 `--min-change-percent` 按 compare 口径判定。
+- `suite_summary`：含
+  - `total`：case 总数；
+  - `comparable`：`comparison` 非 `null` 的 case 数；
+  - `incomplete`：`comparison` 为 `null` 的 case 数；
+  - `suite_decision`：按优先级取可比较 case 的 decision：
+    `regression` > `improvement` > `no_material_change` > `not_significant`；
+    无可比较 case 时为 `incomplete`。
+- `suite_attribution`：只汇总 `comparison` 非 `null` 的 case，口径与
+  compare-suite 相同（百分比中位数、`null` 按正无穷参与比较、
+  `dominant_factor`）。
 
 ## 约定
 
