@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { computeSummary, welchTest, tCriticalValue, welchMeanInterval } = require('../lib/stats');
+const { computeSummary, welchTest, pairedTTest, pairedMeanInterval, tCriticalValue, welchMeanInterval } = require('../lib/stats');
 const { parseArgs } = require('../lib/collect');
 
 test('computeSummary: 单样本', () => {
@@ -173,4 +173,56 @@ test('parseArgs: 缺少取值', () => {
 test('parseArgs: 重复参数', () => {
   const { error } = parseArgs(['--runs', '1', '--runs', '2']);
   assert.match(error, /重复/);
+});
+
+test('pairedTTest: t = mean / (sample_stddev / sqrt(n))，df = n - 1', () => {
+  // deltas [1, 2, 3]：mean 2，样本标准差 1，t = 2 / (1/sqrt(3))
+  const r = pairedTTest([1, 2, 3]);
+  assert.equal(r.t_statistic, Math.round(2 * Math.sqrt(3) * 1e6) / 1e6);
+  assert.equal(r.degrees_of_freedom, 2);
+  assert.ok(r.p_value > 0 && r.p_value < 1);
+});
+
+test('pairedTTest: 显著差异时 p 值小，t 取差值均值方向', () => {
+  const r = pairedTTest([10, 11, 12, 13, 14, 15]);
+  assert.ok(r.t_statistic > 0);
+  assert.ok(r.p_value < 0.001);
+});
+
+test('pairedTTest: 零方差退化——均值 0 与均值非 0', () => {
+  assert.deepEqual(pairedTTest([0, 0, 0]), {
+    t_statistic: 0, degrees_of_freedom: null, p_value: 1,
+  });
+  assert.deepEqual(pairedTTest([5, 5, 5]), {
+    t_statistic: null, degrees_of_freedom: null, p_value: 0,
+  });
+});
+
+test('pairedMeanInterval: 零方差退化为单点，基线均值为 0 时百分比为 null', () => {
+  const r = pairedMeanInterval([7, 7, 7], 100, 0.05);
+  assert.equal(r.level, 0.95);
+  assert.equal(r.lower_ns, 7);
+  assert.equal(r.upper_ns, 7);
+  assert.ok(Math.abs(r.lower_percent - 7) < 1e-9);
+  assert.ok(Math.abs(r.upper_percent - 7) < 1e-9);
+
+  const zero = pairedMeanInterval([0, 0, 0], 0, 0.05);
+  assert.equal(zero.lower_ns, 0);
+  assert.equal(zero.upper_ns, 0);
+  assert.equal(zero.lower_percent, null);
+  assert.equal(zero.upper_percent, null);
+});
+
+test('pairedMeanInterval: 区间围绕差值均值，level 随 alpha 变化', () => {
+  const deltas = [1, 2, 3, 4, 5];
+  const r95 = pairedMeanInterval(deltas, 100, 0.05);
+  const r90 = pairedMeanInterval(deltas, 100, 0.1);
+  assert.equal(r95.level, 0.95);
+  assert.equal(r90.level, 0.9);
+  const mean = 3;
+  assert.ok(r95.lower_ns < mean && r95.upper_ns > mean);
+  assert.ok(r90.upper_ns - r90.lower_ns < r95.upper_ns - r95.lower_ns);
+  // 百分比端点由两端分别除以基线均值再乘 100（基线均值取 100，数值上相等）
+  assert.ok(Math.abs(r95.lower_percent - r95.lower_ns) < 1e-9);
+  assert.ok(Math.abs(r95.upper_percent - r95.upper_ns) < 1e-9);
 });

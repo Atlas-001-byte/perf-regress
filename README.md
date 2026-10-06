@@ -13,7 +13,8 @@
 与套件比较子命令 `perf-regress compare-suite`、系列回归定位子命令
 `perf-regress compare-series`，以及交错 A/B 采集与即时比较子命令
 `perf-regress ab`、多场景交错 A/B 套件子命令
-`perf-regress ab-suite`（零依赖 Node.js）。
+`perf-regress ab-suite`、配对交错 A/B 子命令
+`perf-regress ab-paired`（零依赖 Node.js）。
 
 ## 用法
 
@@ -63,6 +64,16 @@ node bin/perf-regress.js ab \
 node bin/perf-regress.js ab-suite \
   --manifest <manifest.json> \
   --output <套件结果.json> \
+  [--alpha <显著性水平>] \
+  [--min-change-percent <阈值百分比>]
+
+node bin/perf-regress.js ab-paired \
+  --baseline-command '<基线命令>' \
+  --candidate-command '<候选命令>' \
+  --runs <统计次数> \
+  --warmup <预热次数> \
+  --timeout-ms <单次超时毫秒> \
+  --output <结果.json> \
   [--alpha <显著性水平>] \
   [--min-change-percent <阈值百分比>]
 ```
@@ -436,6 +447,67 @@ Benjamini–Hochberg（BH）多重比较校正，输出逐 case 结果、套件�
   `dominant_factor` 取三个中位数中的最大正值，平手按
   central_tendency / tail_latency / variability 顺序，无正值为 `none`；
   没有具可比性 case 时三项百分比均为 `null`、`dominant_factor` 为 `none`。
+
+## ab-paired 子命令
+
+配对交错 A/B：执行口径与 ab 完全相同（先全部预热，再逐轮先 baseline 后
+candidate，全程串行，输出丢弃），但比较时按轮次配对——同一轮两侧均退出 0
+才构成一对，对逐对差值（候选减基线）做配对 t 检验与回归判定，进一步消除
+轮次间环境漂移的影响。
+
+- `--baseline-command` / `--candidate-command`：基线/候选命令，经系统 shell
+  执行，必填，非空。
+- `--runs`：每侧计入统计的执行次数，整数且 `>= 2`，必填。
+- `--warmup`：每侧预热次数，整数且 `>= 0`，缺省 `0`。
+- `--timeout-ms`：单次执行超时毫秒数，整数且 `>= 1`，必填。
+- `--output`：唯一 JSON 输出文件路径，必填，非空。
+- `--alpha`：显著性水平，`0 < alpha < 1`，缺省 `0.05`。
+- `--min-change-percent`：回归/改进判定阈值（百分比），`>= 0`，缺省 `5`。
+- 参数同时支持 `--key value` 与 `--key=value` 两种写法。
+
+### 执行与错误口径
+
+- 与 ab 一致：warmup 的 nonzero_exit/timeout 只记入该侧 `errors`；measure
+  阶段的 nonzero_exit/timeout 跳过该次并记入 `errors`，继续剩余测量；
+  单侧异常不影响另一侧及后续轮次；
+- 进程无法启动（spawn 失败或 shell 126/127）属致命错误：stderr 报告启动失败、
+  退出码 2，不创建或改写 `--output`；
+- 参数无法解析/越界时 stderr 输出一条原因、退出码 2，不创建或改写 `--output`；
+- 存在 measure 错误或完整 pairs 少于 2 时，写完整 JSON 并退出码 3；
+  无这些问题时退出码 0；`--output` 写入失败退出码 4。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`baseline`、`candidate`、`paired`。
+
+- `baseline` / `candidate`：与 ab 完全一致的逐侧采集报告（`command`、
+  `runs`、`warmup`、`timeout_ms`、`unit`、`samples`、`summary`、`errors`）。
+- `paired`：配对比较结果，含 `pairs`、`summary`、`t_test`、
+  `confidence_interval`、`decision`、`attribution`。
+  - `pairs`：完整对（同轮两侧均退出 0），按轮次排列，每项含 `index`
+    （轮次序号）、`baseline_duration_ns`、`candidate_duration_ns`、
+    `delta_ns`（候选减基线）；
+  - `summary`：对 `delta_ns` 的五项汇总 `count`、`mean`、`median`、
+    `p95`、`stddev`（口径与 collect summary 相同，浮点保留六位小数）；
+    空样本时除 `count` 外均为 `null`；
+  - `t_test`：双侧配对 t 检验，含 `t_statistic`、`degrees_of_freedom`、
+    `p_value`；`t_statistic = mean / (sample_stddev / sqrt(count))`
+    （sample_stddev 为无偏样本标准差），`degrees_of_freedom = count - 1`；
+    差值零方差时退化口径与 Welch 一致：均值差为 0 三者依次为
+    `0`、`null`、`1`，均值差非 0 依次为 `null`、`null`、`0`；
+  - `confidence_interval`：配对均值差的双侧 `1 - alpha` 区间，字段为
+    `level`、`lower_ns`、`upper_ns`、`lower_percent`、`upper_percent`；
+    百分比端点由两端分别除以成对基线均值再乘 100，基线均值为 0 时两个
+    百分比端点为 `null`；差值零方差时区间退化为单点；
+  - `decision`：沿用 compare 四类值，以 `t_test.p_value <= alpha` 判显著，
+    再按 mean 百分比（成对候选均值相对成对基线均值）与
+    `--min-change-percent` 选择；基线均值为 0 而候选非 0 视为达到阈值的增加；
+  - `attribution`：对成对样本按 compare 口径给出的归因
+    （`central_tendency_percent`、`tail_latency_percent`、
+    `variability_percent`、`dominant_factor`）；
+  - 完整 pairs 少于 2 时 `t_test`、`confidence_interval`、`decision`
+    均为 `null`（`summary.count` 仍为完整对数）；无任何完整对时
+    `attribution` 三项百分比均为 `null`、`dominant_factor` 为 `none`。
 
 ## 约定
 

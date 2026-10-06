@@ -8,6 +8,7 @@ const { compareSuite } = require('../lib/compare-suite');
 const { compareSeries } = require('../lib/compare-series');
 const { ab } = require('../lib/ab');
 const { abSuite } = require('../lib/ab-suite');
+const { abPaired } = require('../lib/ab-paired');
 
 const USAGE = `Usage: perf-regress collect --command <cmd> --runs <n> --warmup <n> \
 --timeout-ms <ms> --output <path>
@@ -23,6 +24,9 @@ const USAGE = `Usage: perf-regress collect --command <cmd> --runs <n> --warmup <
 [--alpha <a>] [--min-change-percent <p>]
        perf-regress ab-suite --manifest <path> --output <path> \
 [--alpha <a>] [--min-change-percent <p>]
+       perf-regress ab-paired --baseline-command <cmd> --candidate-command <cmd> \
+--runs <n> --warmup <n> --timeout-ms <ms> --output <path> \
+[--alpha <a>] [--min-change-percent <p>]
 
 collect：顺序执行目标命令进行基准采集，结果以 UTF-8 JSON 写入 --output。
 collect-suite：按 manifest 顺序批量采集多个基准场景，含逐 case 结果与套件汇总。
@@ -33,6 +37,8 @@ compare-series：定位每个 case 的候选序列相对固定 baseline 的回�
 ab：基线与候选同批交替测量（先全部预热再测量，每轮先 baseline 后 candidate），
     输出两侧采集结果与即时比较。
 ab-suite：按 manifest 串行执行多个交错 A/B 场景，含 BH 校正、套件汇总与归因。
+ab-paired：与 ab 相同的交错执行，同轮两侧均退出 0 才配成一对，
+    对逐对差值（候选减基线）做配对 t 检验、均值差区间与回归判定。
 
 collect 选项：
   --command <cmd>     被测命令（通过 /bin/sh -c 执行），必填
@@ -80,11 +86,22 @@ ab-suite 选项：
   --alpha <a>                  显著性水平，0 < a < 1，缺省 0.05
   --min-change-percent <p>     回归/改进判定阈值（百分比），>= 0，缺省 5
 
+ab-paired 选项：
+  --baseline-command <cmd>     基线命令（通过 /bin/sh -c 执行），必填
+  --candidate-command <cmd>    候选命令（通过 /bin/sh -c 执行），必填
+  --runs <n>                   每侧计入统计的执行次数，>= 2，必填
+  --warmup <n>                 每侧预热次数，>= 0，缺省 0
+  --timeout-ms <ms>            单次执行超时（毫秒），>= 1，必填
+  --output <path>              唯一 JSON 输出文件，必填
+  --alpha <a>                  显著性水平，0 < a < 1，缺省 0.05
+  --min-change-percent <p>     回归/改进判定阈值（百分比），>= 0，缺省 5
+
 退出码：
   0  成功
-  2  参数错误或输入无效（collect/collect-suite/ab/ab-suite 含进程无法启动；不创建或改写 output）
+  2  参数错误或输入无效（collect/collect-suite/ab/ab-suite/ab-paired 含进程无法启动；不创建或改写 output）
   3  collect/collect-suite：measure 阶段存在被跳过的异常（仍写 output）；
-     ab/ab-suite：存在 measure 错误或任一侧有效样本少于 2（仍写 output）
+     ab/ab-suite：存在 measure 错误或任一侧有效样本少于 2（仍写 output）；
+     ab-paired：存在 measure 错误或完整 pairs 少于 2（仍写 output）
   4  output 写入失败
 `;
 
@@ -101,7 +118,8 @@ async function main() {
     && subcommand !== 'compare-suite'
     && subcommand !== 'compare-series'
     && subcommand !== 'ab'
-    && subcommand !== 'ab-suite') {
+    && subcommand !== 'ab-suite'
+    && subcommand !== 'ab-paired') {
     process.stderr.write(`perf-regress: 未知子命令: ${subcommand}\n\n${USAGE}`);
     process.exit(EXIT_USAGE);
   }
@@ -117,7 +135,8 @@ async function main() {
         : subcommand === 'compare-suite' ? await compareSuite(rest)
           : subcommand === 'compare-series' ? await compareSeries(rest)
             : subcommand === 'ab' ? await ab(rest)
-              : await abSuite(rest);
+              : subcommand === 'ab-suite' ? await abSuite(rest)
+                : await abPaired(rest);
   process.exit(code);
 }
 
