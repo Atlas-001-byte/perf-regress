@@ -68,6 +68,11 @@ test('成功：退出码 0；顶层/逐 case 字段固定，cases 按 manifest �
     }
     assert.notEqual(c.comparison, null);
     assert.deepEqual(Object.keys(c.comparison), COMPARISON_KEYS);
+    // case comparison 的 delta.mean 携带置信区间
+    assert.deepEqual(
+      Object.keys(c.comparison.delta.mean.confidence_interval),
+      ['level', 'lower_ns', 'upper_ns', 'lower_percent', 'upper_percent']);
+    assert.equal(c.comparison.delta.mean.confidence_interval.level, 0.95);
     assert.equal(typeof c.adjusted_p_value, 'number');
     assert.ok(['regression', 'improvement', 'no_material_change', 'not_significant']
       .includes(c.decision));

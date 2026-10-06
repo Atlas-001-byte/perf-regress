@@ -55,7 +55,17 @@ test('回归：显著增加达到阈值 -> regression，结果含固定六项', 
   assert.equal(result.candidate_summary.mean, 120);
 
   assert.deepEqual(Object.keys(result.delta), ['mean', 'median', 'p95', 'stddev']);
-  assert.deepEqual(result.delta.mean, { ns: 20, percent: 20 });
+  assert.deepEqual(Object.keys(result.delta.mean), ['ns', 'percent', 'confidence_interval']);
+  assert.equal(result.delta.mean.ns, 20);
+  assert.equal(result.delta.mean.percent, 20);
+  // 95% 双侧 Welch 区间：diff=20，SE=1，df=8，t(0.975,8)=2.306004
+  assert.deepEqual(result.delta.mean.confidence_interval, {
+    level: 0.95,
+    lower_ns: 17.693996,
+    upper_ns: 22.306004,
+    lower_percent: 17.693996,
+    upper_percent: 22.306004,
+  });
   assert.equal(result.delta.median.ns, 20);
 
   assert.deepEqual(Object.keys(result.welch),
@@ -304,4 +314,103 @@ test('summary 按 collect 七项口径重算，不采用输入文件中的 summa
   assert.equal(result.baseline_summary.median, 25);
   assert.equal(result.baseline_summary.p95, 40);
   assert.equal(result.baseline_summary.stddev, Math.round(Math.sqrt(125) * 1e6) / 1e6);
+});
+
+test('confidence_interval：level 随 alpha 变化，p 值与 decision 不受影响', () => {
+  const dir = tempDir();
+  const baseline = writeCollect(dir, 'base.json', [100, 102, 98, 101, 99]);
+  const candidate = writeCollect(dir, 'cand.json', [120, 122, 118, 121, 119]);
+
+  const out1 = path.join(dir, 'out1.json');
+  const r1 = runCli(['--baseline', baseline, '--candidate', candidate, '--output', out1]);
+  assert.equal(r1.status, 0, r1.stderr);
+  const out2 = path.join(dir, 'out2.json');
+  const r2 = runCli(['--baseline', baseline, '--candidate', candidate,
+    '--output', out2, '--alpha', '0.01']);
+  assert.equal(r2.status, 0, r2.stderr);
+
+  const result1 = readJson(out1);
+  const result2 = readJson(out2);
+  const ci1 = result1.delta.mean.confidence_interval;
+  const ci2 = result2.delta.mean.confidence_interval;
+  assert.equal(ci1.level, 0.95);
+  assert.equal(ci2.level, 0.99);
+  // 更宽的区间：99% 区间严格包含 95% 区间
+  assert.ok(ci2.lower_ns < ci1.lower_ns);
+  assert.ok(ci2.upper_ns > ci1.upper_ns);
+  // alpha 只影响区间 level 与宽度，不改变 p 值与 decision
+  assert.equal(result2.welch.p_value, result1.welch.p_value);
+  assert.equal(result2.decision, result1.decision);
+  // 除置信区间外其余字段完全一致
+  delete result1.delta.mean.confidence_interval;
+  delete result2.delta.mean.confidence_interval;
+  assert.deepEqual(result2, result1);
+});
+
+test('confidence_interval：相同输入与 alpha 产生确定一致的 JSON', () => {
+  const dir = tempDir();
+  const baseline = writeCollect(dir, 'base.json', [100, 102, 98, 101, 99, 103, 97]);
+  const candidate = writeCollect(dir, 'cand.json', [110, 112, 108, 111, 109, 113, 107]);
+  const out1 = path.join(dir, 'out1.json');
+  const out2 = path.join(dir, 'out2.json');
+  const args = ['--baseline', baseline, '--candidate', candidate, '--alpha', '0.1'];
+  assert.equal(runCli([...args, '--output', out1]).status, 0);
+  assert.equal(runCli([...args, '--output', out2]).status, 0);
+  assert.equal(fs.readFileSync(out1, 'utf8'), fs.readFileSync(out2, 'utf8'));
+  assert.equal(readJson(out1).delta.mean.confidence_interval.level, 0.9);
+});
+
+test('confidence_interval：零方差退化情形', () => {
+  const dir = tempDir();
+  // 均值相同：区间两端均为 0
+  const b1 = writeCollect(dir, 'b1.json', [50, 50, 50]);
+  const c1 = writeCollect(dir, 'c1.json', [50, 50]);
+  const out1 = path.join(dir, 'out1.json');
+  assert.equal(runCli(['--baseline', b1, '--candidate', c1, '--output', out1]).status, 0);
+  assert.deepEqual(readJson(out1).delta.mean.confidence_interval, {
+    level: 0.95,
+    lower_ns: 0,
+    upper_ns: 0,
+    lower_percent: 0,
+    upper_percent: 0,
+  });
+
+  // 均值不同：两端均为候选减基线均值
+  const c2 = writeCollect(dir, 'c2.json', [53, 53, 53]);
+  const out2 = path.join(dir, 'out2.json');
+  assert.equal(runCli(['--baseline', b1, '--candidate', c2, '--output', out2]).status, 0);
+  assert.deepEqual(readJson(out2).delta.mean.confidence_interval, {
+    level: 0.95,
+    lower_ns: 3,
+    upper_ns: 3,
+    lower_percent: 6,
+    upper_percent: 6,
+  });
+});
+
+test('confidence_interval：基线均值为 0 时百分比端点为 null', () => {
+  const dir = tempDir();
+  const baseline = writeCollect(dir, 'base.json', [0, 0, 0]);
+  const candidate = writeCollect(dir, 'cand.json', [5, 5, 5]);
+  const out = path.join(dir, 'out.json');
+  assert.equal(runCli(['--baseline', baseline, '--candidate', candidate, '--output', out]).status, 0);
+  assert.deepEqual(readJson(out).delta.mean.confidence_interval, {
+    level: 0.95,
+    lower_ns: 5,
+    upper_ns: 5,
+    lower_percent: null,
+    upper_percent: null,
+  });
+});
+
+test('confidence_interval：仅 delta.mean 携带，median/p95/stddev 不新增字段', () => {
+  const dir = tempDir();
+  const baseline = writeCollect(dir, 'base.json', [100, 102, 98, 101, 99]);
+  const candidate = writeCollect(dir, 'cand.json', [120, 122, 118, 121, 119]);
+  const out = path.join(dir, 'out.json');
+  assert.equal(runCli(['--baseline', baseline, '--candidate', candidate, '--output', out]).status, 0);
+  const result = readJson(out);
+  for (const key of ['median', 'p95', 'stddev']) {
+    assert.deepEqual(Object.keys(result.delta[key]), ['ns', 'percent']);
+  }
 });

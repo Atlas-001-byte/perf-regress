@@ -101,10 +101,18 @@ test('套件成功：cases 按 manifest 顺序，结构、字段顺序与零方�
   assert.equal(alpha.adjusted_p_value, 0);
   assert.equal(alpha.decision, 'regression');
   assert.equal(alpha.delta.mean.percent, 20);
+  // 零方差且均值不同：区间两端均为候选减基线均值
+  assert.deepEqual(alpha.delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: 20, upper_ns: 20, lower_percent: 20, upper_percent: 20,
+  });
   // 零方差相同均值：p=1，校正后仍为 1
   assert.equal(beta.welch.p_value, 1);
   assert.equal(beta.adjusted_p_value, 1);
   assert.equal(beta.decision, 'not_significant');
+  // 零方差相同均值：区间两端均为 0
+  assert.deepEqual(beta.delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: 0, upper_ns: 0, lower_percent: 0, upper_percent: 0,
+  });
 
   assert.deepEqual(result.suite_summary, {
     total: 2,

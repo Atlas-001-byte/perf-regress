@@ -58,6 +58,11 @@ test('成功：退出码 0，顶层字段与两侧 collect 口径正确，compar
   assert.equal(report.comparison.candidate_summary.count, 3);
   assert.ok(['regression', 'improvement', 'no_material_change', 'not_significant']
     .includes(report.comparison.decision));
+  // comparison 的 delta.mean 携带置信区间
+  assert.deepEqual(
+    Object.keys(report.comparison.delta.mean.confidence_interval),
+    ['level', 'lower_ns', 'upper_ns', 'lower_percent', 'upper_percent']);
+  assert.equal(report.comparison.delta.mean.confidence_interval.level, 0.95);
 });
 
 test('交错顺序：先全部预热再测量，每轮先 baseline 后 candidate', () => {
@@ -82,6 +87,8 @@ test('--key=value 写法与可选参数 --alpha/--min-change-percent', () => {
   const report = readJson(out);
   assert.equal(report.baseline.warmup, 0);
   assert.notEqual(report.comparison, null);
+  // alpha 只影响区间 level
+  assert.equal(report.comparison.delta.mean.confidence_interval.level, 0.9);
 });
 
 test('measure nonzero_exit：退出码 3，仍写 JSON，该次被跳过，另一侧不受影响', () => {

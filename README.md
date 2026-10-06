@@ -183,6 +183,13 @@ stdout/stderr、samples/summary/errors 字段口径均与 collect 相同。
 - `delta`：`mean`、`median`、`p95`、`stddev` 四项，每项含
   `ns`（候选减基线差）与 `percent`（相对基线百分比）。
   基线为 0 且候选为 0 时 `percent` 为 0；仅基线为 0 时 `percent` 为 `null`。
+  `mean` 另含 `confidence_interval`：候选均值减基线均值的双侧 Welch
+  置信区间，固定含 `level`（1 - alpha）、`lower_ns`、`upper_ns`、
+  `lower_percent`、`upper_percent`，数值保留六位小数；百分比端点由
+  ns 端点分别除以基线均值再乘 100，基线均值为 0 时为 `null`。
+  两侧方差均为 0 的退化情形：均值相同则两端均为 0，均值不同则两端均为
+  候选减基线均值。alpha 只影响 `level` 与区间宽度，不改变 p 值、
+  BH 校正、decision、suite_summary 或 suite_attribution。
 - `welch`：双侧 Welch t 检验，含 `t_statistic`、`degrees_of_freedom`、`p_value`，
   浮点保留六位小数；`p_value <= alpha` 为显著。
   两边方差均为 0 时：均值相同三者依次为 `0`、`null`、`1`；

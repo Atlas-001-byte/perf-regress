@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { computeSummary, welchTest } = require('../lib/stats');
+const { computeSummary, welchTest, welchConfidenceInterval } = require('../lib/stats');
 const { parseArgs } = require('../lib/collect');
 
 test('computeSummary: 单样本', () => {
@@ -106,4 +106,45 @@ test('parseArgs: 缺少取值', () => {
 test('parseArgs: 重复参数', () => {
   const { error } = parseArgs(['--runs', '1', '--runs', '2']);
   assert.match(error, /重复/);
+});
+
+test('welchConfidenceInterval: 已知取值（diff=3, SE=1, df=8, t(0.975,8)=2.306004）', () => {
+  // 两侧样本方差均为 2.5、n 均为 5 -> SE = 1，df = 8
+  const [lower, upper] = welchConfidenceInterval(
+    [98, 99, 100, 101, 102], [101, 102, 103, 104, 105], 0.05);
+  assert.ok(Math.abs(lower - (3 - 2.306004)) < 1e-6);
+  assert.ok(Math.abs(upper - (3 + 2.306004)) < 1e-6);
+});
+
+test('welchConfidenceInterval: 与 welchTest 的 df 口径一致', () => {
+  // t = diff / SE，区间 = diff ± tCrit * SE -> 半宽 / t 统计量 = SE^2 / diff
+  const baseline = [100, 102, 98, 101, 99];
+  const candidate = [120, 122, 118, 121, 119];
+  const w = welchTest(baseline, candidate);
+  const [lower, upper] = welchConfidenceInterval(baseline, candidate, 0.05);
+  const halfWidth = (upper - lower) / 2;
+  // SE = diff / t；tCrit = halfWidth / SE
+  const se = 20 / w.t_statistic;
+  const tCrit = halfWidth / se;
+  // t(0.975, 8) = 2.306004
+  assert.ok(Math.abs(tCrit - 2.306004) < 1e-6);
+});
+
+test('welchConfidenceInterval: 零方差相同均值 -> [0, 0]', () => {
+  assert.deepEqual(welchConfidenceInterval([5, 5, 5], [5, 5], 0.05), [0, 0]);
+});
+
+test('welchConfidenceInterval: 零方差不同均值 -> 两端均为均值差', () => {
+  assert.deepEqual(welchConfidenceInterval([5, 5], [7, 7, 7], 0.05), [2, 2]);
+});
+
+test('welchConfidenceInterval: alpha 越小区间越宽，且结果确定', () => {
+  const baseline = [10, 12, 11, 9, 13];
+  const candidate = [20, 22, 21, 19, 23];
+  const [lo99, hi99] = welchConfidenceInterval(baseline, candidate, 0.01);
+  const [lo95, hi95] = welchConfidenceInterval(baseline, candidate, 0.05);
+  const [lo50, hi50] = welchConfidenceInterval(baseline, candidate, 0.5);
+  assert.ok(lo99 < lo95 && lo95 < lo50);
+  assert.ok(hi99 > hi95 && hi95 > hi50);
+  assert.deepEqual(welchConfidenceInterval(baseline, candidate, 0.05), [lo95, hi95]);
 });
