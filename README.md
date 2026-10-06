@@ -10,7 +10,8 @@
 
 已实现：基准采集子命令 `perf-regress collect`、套件批量采集子命令
 `perf-regress collect-suite`、比较子命令 `perf-regress compare`
-与套件比较子命令 `perf-regress compare-suite`，以及交错 A/B 采集与即时比较
+与套件比较子命令 `perf-regress compare-suite`、候选序列回归起点定位子命令
+`perf-regress compare-series`，以及交错 A/B 采集与即时比较
 子命令 `perf-regress ab`、多场景交错 A/B 套件子命令
 `perf-regress ab-suite`（零依赖 Node.js）。
 
@@ -40,6 +41,12 @@ node bin/perf-regress.js compare \
 node bin/perf-regress.js compare-suite \
   --manifest <manifest.json> \
   --output <套件结果.json> \
+  [--alpha <显著性水平>] \
+  [--min-change-percent <阈值百分比>]
+
+node bin/perf-regress.js compare-series \
+  --manifest <manifest.json> \
+  --output <序列结果.json> \
   [--alpha <显著性水平>] \
   [--min-change-percent <阈值百分比>]
 
@@ -238,6 +245,63 @@ manifest、case、字段、路径、文件或输入样本不合上述口径时�
   `null` 按正无穷参与比较，中位数为正无穷时写 `null`；
   `dominant_factor` 按 compare 归因顺序取三个中位数中的最大正值，
   平手按该顺序，无正值为 `none`。
+
+## compare-series 子命令
+
+定位候选序列相对固定 baseline 的回归起点：每个 case 有一份 baseline 与一串
+按时间（版本）有序的 candidates，逐个候选按 compare 口径与同一份 baseline 重算
+统计量，并对全部 case 的全部候选的原始 p 值统一做
+Benjamini–Hochberg（BH）多重比较校正，输出逐 case 的候选序列、首个回归起点、
+套件汇总与套件归因。
+
+- `--manifest`：序列 manifest JSON，必填，非空。
+- `--output`：序列结果 JSON 输出文件，必填。
+- `--alpha`：显著性水平，`0 < alpha < 1`，缺省 `0.05`。
+- `--min-change-percent`：回归/改进判定的变化幅度阈值（百分比），`>= 0`，缺省 `5`。
+- 参数同时支持 `--key value` 与 `--key=value` 两种写法。
+
+### manifest 格式（UTF-8 JSON）
+
+顶层为对象，`cases` 为非空数组，每项必须含：
+
+- `name`：非空字符串，在 cases 中唯一；
+- `baseline`：固定基线 collect JSON 路径，非空字符串；
+- `candidates`：非空有序数组，每项为指向 collect 报告的非空字符串路径；
+  数组顺序即候选序列顺序，`index` 从 0 开始；相对路径按 manifest 文件所在目录解析。
+
+manifest、case、字段、路径、文件或输入样本不合上述口径时，stderr 输出一条原因、
+退出码 2，不创建或改写 `--output`；每个候选的样本校验沿用 compare
+（baseline 与每个候选均至少 2 个有效样本，同 case 内 `command` 一致，
+collect errors 不参与统计）。成功退出码 0；结果序列化或 `--output` 写入失败
+退出码 4。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`cases`、`suite_summary`、`suite_attribution`。
+
+- `cases`：按 manifest 顺序排列，每项含 `name`、`command`、`baseline_summary`、
+  `candidates`、`first_regression_index`。
+  - `baseline_summary`：与 collect summary 相同的七项，按 compare 口径重算；
+  - `candidates`：按 manifest 中 `candidates` 顺序排列，每项沿用 compare-suite
+    case 的统计字段并增加 `candidate`、`index`，字段为 `candidate`、`index`、
+    `delta`、`welch`、`adjusted_p_value`、`decision`、`attribution`；
+    `candidate` 为该候选重算的 collect summary 七项，`index` 从 0 起，
+    统计量、Welch（含零方差与基线均值 0 的退化情形）、归因口径与 compare 完全一致；
+  - `adjusted_p_value`：m 为全部 case 的全部候选总数，原始 p 值按
+    compare-suite 的 BH 口径统一校正（跨 case 一起校正）后映回各候选，保留六位小数；
+  - `decision`：四类值与阈值口径沿用 compare-suite，以
+    `adjusted_p_value <= alpha` 判显著，再按 mean 百分比与阈值选择；
+  - `first_regression_index`：候选序列中首个 `decision` 为 `regression` 的
+    `index`，不存在 regression 时为 `null`。
+- `suite_summary`：含 `total_cases`、`total_candidates`、四类同名计数
+  （`regression`、`improvement`、`no_material_change`、`not_significant`，
+  统计全部 case 的全部候选）及 `suite_decision`；`suite_decision` 按优先级取
+  候选 decision：`regression` > `improvement` > `no_material_change` >
+  `not_significant`。
+- `suite_attribution`：聚合全部 case 的全部候选，口径与 compare-suite 完全一致：
+  三个百分比取各候选对应归因百分比的中位数（`null` 按正无穷参与比较，
+  中位数为正无穷时写 `null`），`dominant_factor` 按 compare 归因顺序取三个
+  中位数中的最大正值，平手按该顺序，无正值为 `none`。
 
 ## ab 子命令
 
