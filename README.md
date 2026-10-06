@@ -12,7 +12,8 @@
 `perf-regress collect-suite`、比较子命令 `perf-regress compare`
 与套件比较子命令 `perf-regress compare-suite`、系列回归定位子命令
 `perf-regress compare-series`，以及交错 A/B 采集与即时比较子命令
-`perf-regress ab`、多场景交错 A/B 套件子命令
+`perf-regress ab`、配对交错 A/B 子命令
+`perf-regress ab-paired`、多场景交错 A/B 套件子命令
 `perf-regress ab-suite`（零依赖 Node.js）。
 
 ## 用法
@@ -51,6 +52,16 @@ node bin/perf-regress.js compare-series \
   [--min-change-percent <阈值百分比>]
 
 node bin/perf-regress.js ab \
+  --baseline-command '<基线命令>' \
+  --candidate-command '<候选命令>' \
+  --runs <统计次数> \
+  --warmup <预热次数> \
+  --timeout-ms <单次超时毫秒> \
+  --output <结果.json> \
+  [--alpha <显著性水平>] \
+  [--min-change-percent <阈值百分比>]
+
+node bin/perf-regress.js ab-paired \
   --baseline-command '<基线命令>' \
   --candidate-command '<候选命令>' \
   --runs <统计次数> \
@@ -367,6 +378,80 @@ collect 报告的 errors 不参与统计。成功退出码 0；结果序列化�
   `decision`、`attribution`（Welch 双侧检验与现有阈值产生四类决策），
   其 `delta.mean.confidence_interval` 定义与 compare 完全相同、
   `level = 1 - alpha`；否则为 `null`（此时不含任何区间字段）。
+
+## ab-paired 子命令
+
+配对交错 A/B：执行口径与 `ab` 完全相同（先两侧全部预热，再逐轮先 baseline
+后 candidate，系统 shell 串行执行，stdout/stderr 丢弃），但只统计**同轮两侧
+均退出 0** 的完整配对，并对配对差值（候选减基线）做配对 t 检验。
+
+- `--baseline-command` / `--candidate-command`：基线/候选命令，经系统 shell
+  执行，必填，非空。
+- `--runs`：每侧计入统计的执行次数，整数且 `>= 2`，必填。
+- `--warmup`：每侧预热次数，整数且 `>= 0`，缺省 `0`。
+- `--timeout-ms`：单次执行超时毫秒数，整数且 `>= 1`，必填。
+- `--output`：唯一 JSON 输出文件路径，必填，非空。
+- `--alpha`：显著性水平，`0 < alpha < 1`，缺省 `0.05`。
+- `--min-change-percent`：回归/改进判定阈值（百分比），`>= 0`，缺省 `5`。
+- 参数同时支持 `--key value` 与 `--key=value` 两种写法。
+- 参数须在执行前完整校验：非法值、空命令、`runs < 2` 或范围不符时 stderr
+  输出一条原因、退出码 2，不创建或改写 `--output`；进程无法启动同为退出码 2。
+
+### 配对与错误口径
+
+- 每个 measure 轮次先执行 baseline 再执行 candidate；任一侧 timeout 或
+  nonzero_exit 时，该次记入该侧 `errors` 并跳过，**该轮不产生配对**。
+- 仅同轮（两侧 measure `index` 相同）两侧均退出 0 时计为一个 pair。
+- 进程无法启动（spawn 失败或 shell 126/127）属致命错误：stderr 报告启动失败、
+  退出码 2，不创建或改写 `--output`。
+- 普通测量错误，或完整 pairs 少于 2 时，写完整 JSON 并退出码 3：
+  此时 `paired.summary.count` 为完整配对数，`paired.t_test`、
+  `paired.confidence_interval`、`paired.decision` 为 `null`；
+  完整 pairs 达到 2 时即使存在测量错误仍写出全部配对统计。
+- 无上述问题时退出码 0；`--output` 写入失败退出码 4。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`baseline`、`candidate`、`paired`。
+
+- `baseline` / `candidate`：各含 `command`、`runs`、`warmup`、`timeout_ms`、
+  `unit`、`samples`、`summary`、`errors`，口径与 collect/ab 输出一致
+  （`unit` 恒为 `"ns"`），两侧各自记录全部退出 0 的样本，不因对侧缺轮而丢弃。
+- `paired`：含 `pairs`、`summary`、`t_test`、`confidence_interval`、
+  `decision`、`attribution`。
+  - `pairs`：按 `index` 升序的完整配对，每项含 `index`、
+    `baseline_duration_ns`、`candidate_duration_ns`、`delta_ns`，
+    其中 `delta_ns = candidate_duration_ns - baseline_duration_ns`。
+  - `summary`：对 `delta_ns` 计算，固定含 `count`、`mean`、`median`、
+    `p95`、`stddev`（中位数、p95、总体标准差口径同 collect，浮点保留六位
+    小数）；空样本时 `count` 为 0，其余四项为 `null`。
+  - `t_test`：双侧配对 t 检验，
+    `t_statistic = mean / (sample_stddev / sqrt(count))`
+    （sample_stddev 为样本标准差，除以 count-1），
+    `degrees_of_freedom = count - 1`，含 `t_statistic`、
+    `degrees_of_freedom`、`p_value`，浮点保留六位小数；`p_value <= alpha`
+    为显著。差值零方差时按 compare 的零方差语义：均值为 0 三者依次为
+    `0`、`null`、`1`，均值非 0 依次为 `null`、`null`、`0`。
+  - `confidence_interval`：均值差的双侧（1 - alpha）配对区间，字段为
+    `level`、`lower_ns`、`upper_ns`、`lower_percent`、`upper_percent`，
+    数值保留六位小数；`level = 1 - alpha`；
+    `lower_ns` / `upper_ns = mean ± t*·sample_stddev/sqrt(count)`，
+    t* 为自由度 count-1 的 t 分布双侧分位点；
+    `lower_percent` / `upper_percent` 由两端分别除以**配对样本的基线均值**
+    再乘 100，基线均值为 0 时两个百分比端点均为 `null`；
+    差值零方差时区间退化为单点（均值差），该退化不改变 t_test 与 decision
+    口径。alpha 只决定区间 `level`（及端点），不影响其他字段。
+  - `decision`：沿用 compare 四类值（`regression` / `improvement` /
+    `no_material_change` / `not_significant`），以配对 `t_test.p_value`
+    判显著，再按 mean 变化百分比与 `--min-change-percent` 选择；
+    基线均值为 0 而候选非 0（百分比为 `null`）视为达到阈值的增加。
+  - `attribution`：`central_tendency_percent`、`tail_latency_percent`、
+    `variability_percent` 分别对应配对后两侧 summary 的 mean、p95、
+    stddev 的变化百分比，`dominant_factor` 口径与 compare 完全一致
+    （平手按 central_tendency / tail_latency / variability 顺序，
+    百分比为 `null` 视为无穷大正向，无正向值为 `none`）。
+  - 完整 pairs 少于 2 时 `t_test`、`confidence_interval`、`decision`、
+    `attribution` 均为 `null`。
 
 ## ab-suite 子命令
 

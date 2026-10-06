@@ -2,7 +2,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { computeSummary, welchTest, tCriticalValue, welchMeanInterval } = require('../lib/stats');
+const { computeSummary, welchTest, tCriticalValue, welchMeanInterval,
+  pairedTTest, pairedMeanInterval } = require('../lib/stats');
 const { parseArgs } = require('../lib/collect');
 
 test('computeSummary: 单样本', () => {
@@ -143,6 +144,79 @@ test('welchMeanInterval: 基线均值 0 时两个百分比端点为 null', () =>
 test('welchMeanInterval: alpha 仅决定 level，区间随 level 升高而变宽', () => {
   const w95 = welchMeanInterval([1, 2, 3], [4, 5, 6], 0.05);
   const w90 = welchMeanInterval([1, 2, 3], [4, 5, 6], 0.1);
+  assert.equal(w95.level, 0.95);
+  assert.equal(w90.level, 0.9);
+  assert.ok(w90.upper_ns - w90.lower_ns < w95.upper_ns - w95.lower_ns);
+});
+
+test('pairedTTest: 已知取值（deltas [1,1,4]，t=2, df=2, 双侧 p=0.183503）', () => {
+  // mean=2，样本方差=3，se=sqrt(3/3)=1，t=2；
+  // 双侧 p = I_{1/3}(1, 1/2) = 1 - sqrt(2/3) ≈ 0.183503
+  const w = pairedTTest([1, 1, 4]);
+  assert.deepEqual(w, { t_statistic: 2, degrees_of_freedom: 2, p_value: 0.183503 });
+});
+
+test('pairedTTest: t = mean / (sample_stddev / sqrt(count))，方向为候选减基线', () => {
+  // deltas [3,6] -> mean=4.5, 样本方差=4.5, se=sqrt(4.5/2)=1.5, t=3, df=1
+  const w = pairedTTest([3, 6]);
+  assert.equal(w.t_statistic, 3);
+  assert.equal(w.degrees_of_freedom, 1);
+  assert.ok(w.p_value > 0 && w.p_value < 1);
+  // 差值取反 -> t 取反，p 相同
+  const neg = pairedTTest([-3, -6]);
+  assert.equal(neg.t_statistic, -3);
+  assert.equal(neg.p_value, w.p_value);
+});
+
+test('pairedTTest: 零方差均值为 0 -> {0, null, 1}', () => {
+  assert.deepEqual(pairedTTest([0, 0, 0]),
+    { t_statistic: 0, degrees_of_freedom: null, p_value: 1 });
+});
+
+test('pairedTTest: 零方差均值非 0 -> {null, null, 0}', () => {
+  assert.deepEqual(pairedTTest([2, 2, 2]),
+    { t_statistic: null, degrees_of_freedom: null, p_value: 0 });
+});
+
+test('pairedMeanInterval: 均值差双侧配对区间（原始未取整值）', () => {
+  // deltas [1,1,4]：mean=2，样本方差=3，se=1，df=2，t*=4.30265273
+  const tc = tCriticalValue(2, 0.05);
+  const ci = pairedMeanInterval([1, 1, 4], 10, 0.05);
+  assert.equal(ci.level, 0.95);
+  const r6 = (v) => Math.round(v * 1e6) / 1e6;
+  assert.equal(r6(ci.lower_ns), r6(2 - tc));
+  assert.equal(r6(ci.upper_ns), r6(2 + tc));
+  // 百分比端点各除以基线均值 10 再乘 100
+  assert.equal(r6(ci.lower_percent), r6((2 - tc) / 10 * 100));
+  assert.equal(r6(ci.upper_percent), r6((2 + tc) / 10 * 100));
+  assert.ok(Math.abs((ci.lower_ns + ci.upper_ns) / 2 - 2) < 1e-9);
+});
+
+test('pairedMeanInterval: 零方差退化为单点（均值差）', () => {
+  const same = pairedMeanInterval([0, 0], 5, 0.05);
+  assert.equal(same.level, 0.95);
+  assert.equal(same.lower_ns, 0);
+  assert.equal(same.upper_ns, 0);
+  assert.equal(same.lower_percent, 0);
+  assert.equal(same.upper_percent, 0);
+  const diff = pairedMeanInterval([3, 3], 5, 0.05);
+  assert.equal(diff.lower_ns, 3);
+  assert.equal(diff.upper_ns, 3);
+  assert.equal(diff.lower_percent, 60);
+  assert.equal(diff.upper_percent, 60);
+});
+
+test('pairedMeanInterval: 基线均值为 0 时两个百分比端点为 null', () => {
+  const ci = pairedMeanInterval([2, 2], 0, 0.05);
+  assert.equal(ci.lower_ns, 2);
+  assert.equal(ci.upper_ns, 2);
+  assert.equal(ci.lower_percent, null);
+  assert.equal(ci.upper_percent, null);
+});
+
+test('pairedMeanInterval: alpha 仅决定 level，区间随 level 升高而变宽', () => {
+  const w95 = pairedMeanInterval([1, 1, 4], 10, 0.05);
+  const w90 = pairedMeanInterval([1, 1, 4], 10, 0.1);
   assert.equal(w95.level, 0.95);
   assert.equal(w90.level, 0.9);
   assert.ok(w90.upper_ns - w90.lower_ns < w95.upper_ns - w95.lower_ns);
