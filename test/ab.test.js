@@ -58,6 +58,21 @@ test('成功：退出码 0，顶层字段与两侧 collect 口径正确，compar
   assert.equal(report.comparison.candidate_summary.count, 3);
   assert.ok(['regression', 'improvement', 'no_material_change', 'not_significant']
     .includes(report.comparison.decision));
+  // delta.mean 下含 confidence_interval，level 随默认 alpha=0.05
+  const ci = report.comparison.delta.mean.confidence_interval;
+  assert.deepEqual(Object.keys(ci),
+    ['level', 'lower_ns', 'upper_ns', 'lower_percent', 'upper_percent']);
+  assert.equal(ci.level, 0.95);
+  assert.ok(ci.lower_ns <= ci.upper_ns);
+  assert.equal('confidence_interval' in report.comparison.delta.median, false);
+});
+
+test('comparison 为 null（有效样本不足）时不提供 confidence_interval', () => {
+  const out = withTempFile('nullcmp.json');
+  const r = runCli(['--baseline-command', 'true', '--candidate-command', 'exit 7',
+    '--runs', '2', '--timeout-ms', '5000', '--output', out]);
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(readJson(out).comparison, null);
 });
 
 test('交错顺序：先全部预热再测量，每轮先 baseline 后 candidate', () => {

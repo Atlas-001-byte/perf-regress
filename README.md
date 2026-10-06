@@ -183,6 +183,20 @@ stdout/stderr、samples/summary/errors 字段口径均与 collect 相同。
 - `delta`：`mean`、`median`、`p95`、`stddev` 四项，每项含
   `ns`（候选减基线差）与 `percent`（相对基线百分比）。
   基线为 0 且候选为 0 时 `percent` 为 0；仅基线为 0 时 `percent` 为 `null`。
+  - `mean` 另含 `confidence_interval`：候选均值减基线均值差的双侧 Welch
+    区间，字段为 `level`、`lower_ns`、`upper_ns`、`lower_percent`、
+    `upper_percent`，数值保留六位小数。
+    - `level` 等于 `1 - alpha`（默认 alpha 为 0.05 时即 `0.95`）；
+    - `lower_ns` / `upper_ns` 为差值的区间两端
+      （差 ± 临界值 t*·sqrt(v1/n1 + v2/n2)，t* 为 t 分布自由度
+      (v1/n1 + v2/n2)² / ((v1/n1)²/(n1-1) + (v2/n2)²/(n2-1)) 的双侧分位点）；
+    - `lower_percent` / `upper_percent` 由两端**分别**除以基线均值再乘 100，
+      因此不围绕点估计对称；基线均值为 0 时两个百分比端点均为 `null`；
+    - 两侧方差均为 0 时区间退化为单点：均值相同则两端均为 0，
+      均值不同则两端均为候选减基线均值；该退化不改变 Welch 与 decision 口径。
+    - alpha 只决定区间 `level`（及端点），不影响 `welch`、`decision`、
+      `attribution` 等任何既有字段。
+  - `median`、`p95`、`stddev` 不提供 `confidence_interval`。
 - `welch`：双侧 Welch t 检验，含 `t_statistic`、`degrees_of_freedom`、`p_value`，
   浮点保留六位小数；`p_value <= alpha` 为显著。
   两边方差均为 0 时：均值相同三者依次为 `0`、`null`、`1`；
@@ -232,6 +246,9 @@ manifest、case、字段、路径、文件或输入样本不合上述口径时�
   `candidate_summary`、`delta`、`welch`、`adjusted_p_value`、`decision`、
   `attribution`。
   - 统计量、Welch（含零方差与基线均值 0 的退化情形）、归因口径与 compare 完全一致；
+    `delta.mean.confidence_interval` 定义也与 compare 完全相同，`level = 1 - alpha`；
+    alpha 只影响该区间，不影响原始 p 值、`adjusted_p_value`、`decision`、
+    `suite_summary` 或 `suite_attribution`；
   - `adjusted_p_value`：m 个原始 p 值升序后记 p_(1)<=...<=p_(m)，按
     q_(i) = min(1, min over j>=i (m·p_(j)/j)) 计算后映回原序，保留六位小数；
   - `decision`：沿用 compare 四类值，但以 `adjusted_p_value <= alpha` 判显著，
@@ -289,6 +306,10 @@ collect 报告的 errors 不参与统计。成功退出码 0；结果序列化�
     `candidate` 回显 manifest 中该候选的路径串，`index` 为其在序列中的下标
     （从 0 起）；统计量、Welch（含零方差与基线均值 0 的退化情形）、
     delta、归因口径与 compare 完全一致，baseline 为该 case 的固定 baseline；
+    每个候选的 `delta.mean.confidence_interval` 定义也与 compare 完全相同，
+    `level = 1 - alpha`；alpha 只影响该区间，不影响 p 值、BH 校正、
+    `decision`、`first_regression_index`、`suite_summary` 或
+    `suite_attribution`；
   - `adjusted_p_value`：对全部候选的原始 p 值统一按 compare-suite 的 BH
     口径校正（m 为全部候选总数）后映回各候选，保留六位小数；
   - `decision`：沿用 compare 四类值，以 `adjusted_p_value <= alpha` 判显著，
@@ -343,8 +364,9 @@ collect 报告的 errors 不参与统计。成功退出码 0；结果序列化�
   （`unit` 恒为 `"ns"`）。
 - `comparison`：两侧都至少有两个 exit_code 为 0 的样本时，为 compare 输出
   口径的对象，含 `baseline_summary`、`candidate_summary`、`delta`、`welch`、
-  `decision`、`attribution`（Welch 双侧检验与现有阈值产生四类决策）；
-  否则为 `null`。
+  `decision`、`attribution`（Welch 双侧检验与现有阈值产生四类决策），
+  其 `delta.mean.confidence_interval` 定义与 compare 完全相同、
+  `level = 1 - alpha`；否则为 `null`（此时不含任何区间字段）。
 
 ## ab-suite 子命令
 
@@ -393,7 +415,9 @@ Benjamini–Hochberg（BH）多重比较校正，输出逐 case 结果、套件�
   `name`、`baseline`、`candidate`、`comparison`、`adjusted_p_value`、
   `decision`；`baseline`/`candidate` 与 ab 完全一致。
   - `comparison` 非 null 时与 ab 的 `comparison` 完全一致（其 `decision`
-    以原始 p 值按 compare 口径判定）；
+    以原始 p 值按 compare 口径判定，`delta.mean.confidence_interval`
+    同样为 `level = 1 - alpha` 的 Welch 区间，alpha 不改变 p 值、
+    BH 校正、decision、suite_summary、suite_attribution）；
   - `adjusted_p_value` 与顶层 `decision` 沿用 compare-suite 的 BH 校正口径：
     仅对 `comparison` 非 null 的 case 的原始 p 值做 BH 校正，以
     `adjusted_p_value <= alpha` 判显著，再按 mean 百分比与

@@ -97,6 +97,14 @@ test('系列成功：结构、字段顺序、固定 baseline、index 从 0 起�
   assert.equal(alpha.candidates[1].adjusted_p_value, 0);
   assert.equal(alpha.candidates[1].decision, 'regression');
   assert.equal(alpha.candidates[1].delta.mean.percent, 20);
+  // 零方差相同均值：区间两端 0
+  assert.deepEqual(alpha.candidates[0].delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: 0, upper_ns: 0, lower_percent: 0, upper_percent: 0,
+  });
+  // 零方差均值不同：区间退化为单点 20ns / 20%
+  assert.deepEqual(alpha.candidates[1].delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: 20, upper_ns: 20, lower_percent: 20, upper_percent: 20,
+  });
   // 首个 regression 在 index 1
   assert.equal(alpha.first_regression_index, 1);
 
@@ -104,6 +112,11 @@ test('系列成功：结构、字段顺序、固定 baseline、index 从 0 起�
   assert.equal(beta.candidates[0].candidate, 'b-c0.json');
   assert.equal(beta.candidates[0].decision, 'improvement');
   assert.equal(beta.candidates[0].delta.mean.percent, -16.666667);
+  // 退化单点区间 -20ns，百分比两端同为 -16.666667
+  assert.deepEqual(beta.candidates[0].delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: -20, upper_ns: -20,
+    lower_percent: -16.666667, upper_percent: -16.666667,
+  });
   assert.equal(beta.first_regression_index, null);
 
   assert.deepEqual(result.suite_summary, {

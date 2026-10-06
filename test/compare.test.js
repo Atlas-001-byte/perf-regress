@@ -55,8 +55,19 @@ test('回归：显著增加达到阈值 -> regression，结果含固定六项', 
   assert.equal(result.candidate_summary.mean, 120);
 
   assert.deepEqual(Object.keys(result.delta), ['mean', 'median', 'p95', 'stddev']);
-  assert.deepEqual(result.delta.mean, { ns: 20, percent: 20 });
+  assert.equal(result.delta.mean.ns, 20);
+  assert.equal(result.delta.mean.percent, 20);
+  assert.deepEqual(Object.keys(result.delta.mean),
+    ['ns', 'percent', 'confidence_interval']);
+  assert.deepEqual(result.delta.mean.confidence_interval, {
+    level: 0.95,
+    lower_ns: 17.693996,
+    upper_ns: 22.306004,
+    lower_percent: 17.693996,
+    upper_percent: 22.306004,
+  });
   assert.equal(result.delta.median.ns, 20);
+  assert.equal('confidence_interval' in result.delta.median, false);
 
   assert.deepEqual(Object.keys(result.welch),
     ['t_statistic', 'degrees_of_freedom', 'p_value']);
@@ -139,6 +150,127 @@ test('基线为 0：候选同为 0 时百分比为 0，候选非 0 时百分比�
   assert.equal(result.delta.mean.ns, 5);
   // 百分比 null 视为达到阈值的增加
   assert.equal(result.decision, 'regression');
+});
+
+test('confidence_interval：双侧 Welch 95% 区间，端点各除以基线均值，保留六位小数', () => {
+  const dir = tempDir();
+  // baseline [1,2,3] 均值 2；candidate [4,5,6] 均值 5；差 3；
+  // se=sqrt(1/3+1/3)，df=4，t*=2.776445 -> ns [0.733042, 5.266958]；
+  // 百分比端点分别 /2*100 -> [36.652103, 263.347897]（非以点估计 150% 对称）。
+  const baseline = writeCollect(dir, 'base.json', [1, 2, 3]);
+  const candidate = writeCollect(dir, 'cand.json', [4, 5, 6]);
+  const out = path.join(dir, 'out.json');
+  const r = runCli(['--baseline', baseline, '--candidate', candidate, '--output', out]);
+  assert.equal(r.status, 0, r.stderr);
+  const ci = readJson(out).delta.mean.confidence_interval;
+  assert.deepEqual(ci, {
+    level: 0.95,
+    lower_ns: 0.733042,
+    upper_ns: 5.266958,
+    lower_percent: 36.652103,
+    upper_percent: 263.347897,
+  });
+});
+
+test('confidence_interval：单侧零方差仍按 Welch 区间计算', () => {
+  const dir = tempDir();
+  const baseline = writeCollect(dir, 'base.json', [100, 100, 100]);
+  const candidate = writeCollect(dir, 'cand.json', [100, 110, 120]);
+  const out = path.join(dir, 'out.json');
+  const r = runCli(['--baseline', baseline, '--candidate', candidate, '--output', out]);
+  assert.equal(r.status, 0, r.stderr);
+  const ci = readJson(out).delta.mean.confidence_interval;
+  assert.equal(ci.level, 0.95);
+  assert.ok(ci.lower_ns < 10 && ci.upper_ns > 10);
+  assert.ok(ci.lower_ns <= ci.upper_ns);
+  assert.equal(typeof ci.lower_percent, 'number');
+});
+
+test('confidence_interval：两侧方差均为 0 退化为单点；基线均值 0 时百分比为 null', () => {
+  const dir = tempDir();
+  const b = (n, d) => writeCollect(dir, n, d);
+
+  // 均值相同：两端均为 0，百分比也为 0
+  const o1 = path.join(dir, 'o1.json');
+  let r = runCli(['--baseline', b('b1.json', [5, 5, 5]),
+    '--candidate', b('c1.json', [5, 5]), '--output', o1]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readJson(o1).delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: 0, upper_ns: 0, lower_percent: 0, upper_percent: 0,
+  });
+
+  // 均值不同：两端均为候选减基线差（2），百分比同为 40
+  const o2 = path.join(dir, 'o2.json');
+  r = runCli(['--baseline', b('b2.json', [5, 5]),
+    '--candidate', b('c2.json', [7, 7, 7]), '--output', o2]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readJson(o2).delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: 2, upper_ns: 2, lower_percent: 40, upper_percent: 40,
+  });
+
+  // 基线均值 0、候选非 0：ns 退化为单点，百分比端点均为 null
+  const o3 = path.join(dir, 'o3.json');
+  r = runCli(['--baseline', b('b3.json', [0, 0]),
+    '--candidate', b('c3.json', [5, 5]), '--output', o3]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readJson(o3).delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: 5, upper_ns: 5, lower_percent: null, upper_percent: null,
+  });
+
+  // 基线与候选均值同为 0：ns 两端 0，百分比端点 null
+  const o4 = path.join(dir, 'o4.json');
+  r = runCli(['--baseline', b('b4.json', [0, 0]),
+    '--candidate', b('c4.json', [0, 0]), '--output', o4]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readJson(o4).delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: 0, upper_ns: 0, lower_percent: null, upper_percent: null,
+  });
+});
+
+test('confidence_interval：alpha 只改变 level 与区间宽度，p 值/decision/字段不受影响', () => {
+  const dir = tempDir();
+  const baseline = writeCollect(dir, 'base.json', [1, 2, 3]);
+  const candidate = writeCollect(dir, 'cand.json', [4, 5, 6]);
+  const run = (alpha) => {
+    const out = path.join(dir, `a-${alpha}.json`);
+    const rr = runCli(['--baseline', baseline, '--candidate', candidate,
+      '--output', out, '--alpha', String(alpha)]);
+    assert.equal(rr.status, 0, rr.stderr);
+    return readJson(out);
+  };
+  const r95 = run(0.05);
+  const r90 = run(0.1);
+  assert.equal(r95.delta.mean.confidence_interval.level, 0.95);
+  assert.equal(r90.delta.mean.confidence_interval.level, 0.9);
+  // 同一输入下 Welch 完全一致
+  assert.deepEqual(r95.welch, r90.welch);
+  assert.deepEqual(r95.decision, r90.decision);
+  assert.deepEqual(r95.attribution, r90.attribution);
+  // 点估计不变，仅区间随置信度变窄
+  assert.equal(r95.delta.mean.ns, r90.delta.mean.ns);
+  const w95 = r95.delta.mean.confidence_interval.upper_ns
+    - r95.delta.mean.confidence_interval.lower_ns;
+  const w90 = r90.delta.mean.confidence_interval.upper_ns
+    - r90.delta.mean.confidence_interval.lower_ns;
+  assert.ok(w90 < w95);
+  // 区间关于点估计对称（Welch 区间）
+  const mid = (ci) => (ci.lower_ns + ci.upper_ns) / 2;
+  assert.equal(Math.round(mid(r95.delta.mean.confidence_interval) * 1e6) / 1e6,
+    r95.delta.mean.ns);
+});
+
+test('confidence_interval：相同输入与 alpha 产出确定一致的 JSON', () => {
+  const dir = tempDir();
+  const baseline = writeCollect(dir, 'base.json', [1, 2, 3]);
+  const candidate = writeCollect(dir, 'cand.json', [4, 5, 6]);
+  const o1 = path.join(dir, 'o1.json');
+  const o2 = path.join(dir, 'o2.json');
+  for (const o of [o1, o2]) {
+    const rr = runCli(['--baseline', baseline, '--candidate', candidate,
+      '--output', o, '--alpha', '0.05']);
+    assert.equal(rr.status, 0, rr.stderr);
+  }
+  assert.equal(fs.readFileSync(o1, 'utf8'), fs.readFileSync(o2, 'utf8'));
 });
 
 test('阈值与 alpha 可调：--min-change-percent、--alpha', () => {

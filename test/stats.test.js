@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { computeSummary, welchTest } = require('../lib/stats');
+const { computeSummary, welchTest, tCriticalValue, welchMeanInterval } = require('../lib/stats');
 const { parseArgs } = require('../lib/collect');
 
 test('computeSummary: 单样本', () => {
@@ -79,6 +79,73 @@ test('welchTest: 单侧零方差仍可计算', () => {
   assert.equal(typeof w.t_statistic, 'number');
   assert.equal(typeof w.degrees_of_freedom, 'number');
   assert.ok(w.p_value > 0 && w.p_value < 1);
+});
+
+test('tCriticalValue: 反解的双侧临界值与已知 t 分位点一致', () => {
+  const r6 = (v) => Math.round(v * 1e6) / 1e6;
+  assert.equal(r6(tCriticalValue(1, 0.05)), 12.706205);
+  assert.equal(r6(tCriticalValue(2, 0.05)), 4.302653);
+  assert.equal(r6(tCriticalValue(4, 0.05)), 2.776445);
+  assert.equal(r6(tCriticalValue(10, 0.05)), 2.228139);
+  assert.equal(r6(tCriticalValue(1000, 0.05)), 1.962339);
+  // alpha 改变临界值：alpha 越大（置信度越低）临界值越小
+  assert.equal(r6(tCriticalValue(4, 0.1)), 2.131847);
+  assert.ok(tCriticalValue(4, 0.1) < tCriticalValue(4, 0.05));
+});
+
+test('welchMeanInterval: 95% Welch 区间（原始未取整值）', () => {
+  // [1,2,3] vs [4,5,6]：差 3，se=sqrt(2/3)，df=4，t*=2.776445
+  const ci = welchMeanInterval([1, 2, 3], [4, 5, 6], 0.05);
+  assert.equal(ci.level, 0.95);
+  const r6 = (v) => Math.round(v * 1e6) / 1e6;
+  assert.equal(r6(ci.lower_ns), 0.733042);
+  assert.equal(r6(ci.upper_ns), 5.266958);
+  // 百分比端点各除以基线均值 2 再乘 100
+  assert.equal(r6(ci.lower_percent), 36.652103);
+  assert.equal(r6(ci.upper_percent), 263.347897);
+  // 区间关于点估计 3 对称
+  assert.ok(Math.abs((ci.lower_ns + ci.upper_ns) / 2 - 3) < 1e-9);
+});
+
+test('welchMeanInterval: 单侧零方差仍可计算', () => {
+  const ci = welchMeanInterval([100, 100, 100], [100, 110, 120], 0.05);
+  assert.equal(ci.level, 0.95);
+  assert.ok(ci.lower_ns < ci.upper_ns);
+  assert.equal(typeof ci.lower_percent, 'number');
+});
+
+test('welchMeanInterval: 两侧零方差退化为单点', () => {
+  // 均值相同：两端 0
+  assert.deepEqual(welchMeanInterval([5, 5, 5], [5, 5], 0.05),
+    { level: 0.95, lower_ns: 0, upper_ns: 0, lower_percent: 0, upper_percent: 0 });
+  // 均值不同：两端均为候选减基线差
+  const ci = welchMeanInterval([5, 5], [7, 7, 7], 0.05);
+  assert.equal(ci.lower_ns, 2);
+  assert.equal(ci.upper_ns, 2);
+  assert.equal(ci.lower_percent, 40);
+  assert.equal(ci.upper_percent, 40);
+});
+
+test('welchMeanInterval: 基线均值 0 时两个百分比端点为 null', () => {
+  const ci = welchMeanInterval([0, 0], [5, 5], 0.05);
+  assert.equal(ci.lower_ns, 5);
+  assert.equal(ci.upper_ns, 5);
+  assert.equal(ci.lower_percent, null);
+  assert.equal(ci.upper_percent, null);
+  // 两边均值同为 0：ns 两端 0，百分比仍 null
+  const zero = welchMeanInterval([0, 0], [0, 0], 0.05);
+  assert.equal(zero.lower_ns, 0);
+  assert.equal(zero.upper_ns, 0);
+  assert.equal(zero.lower_percent, null);
+  assert.equal(zero.upper_percent, null);
+});
+
+test('welchMeanInterval: alpha 仅决定 level，区间随 level 升高而变宽', () => {
+  const w95 = welchMeanInterval([1, 2, 3], [4, 5, 6], 0.05);
+  const w90 = welchMeanInterval([1, 2, 3], [4, 5, 6], 0.1);
+  assert.equal(w95.level, 0.95);
+  assert.equal(w90.level, 0.9);
+  assert.ok(w90.upper_ns - w90.lower_ns < w95.upper_ns - w95.lower_ns);
 });
 
 test('parseArgs: --key=value 与 --key value 混用', () => {

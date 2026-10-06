@@ -101,10 +101,25 @@ test('套件成功：cases 按 manifest 顺序，结构、字段顺序与零方�
   assert.equal(alpha.adjusted_p_value, 0);
   assert.equal(alpha.decision, 'regression');
   assert.equal(alpha.delta.mean.percent, 20);
-  // 零方差相同均值：p=1，校正后仍为 1
+  // 区间退化为单点：两端均为候选减基线差（20ns / 20%）
+  assert.deepEqual(alpha.delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: 20, upper_ns: 20, lower_percent: 20, upper_percent: 20,
+  });
+  // 零方差相同均值：p=1，校正后仍为 1；区间两端为 0
   assert.equal(beta.welch.p_value, 1);
   assert.equal(beta.adjusted_p_value, 1);
   assert.equal(beta.decision, 'not_significant');
+  assert.deepEqual(beta.delta.mean.confidence_interval, {
+    level: 0.95, lower_ns: 0, upper_ns: 0, lower_percent: 0, upper_percent: 0,
+  });
+  // 仅 mean 有区间，其余三项无
+  for (const c of result.cases) {
+    assert.deepEqual(Object.keys(c.delta.mean.confidence_interval),
+      ['level', 'lower_ns', 'upper_ns', 'lower_percent', 'upper_percent']);
+    assert.equal('confidence_interval' in c.delta.median, false);
+    assert.equal('confidence_interval' in c.delta.p95, false);
+    assert.equal('confidence_interval' in c.delta.stddev, false);
+  }
 
   assert.deepEqual(result.suite_summary, {
     total: 2,
@@ -142,6 +157,44 @@ test('相对路径按 manifest 所在目录解析', () => {
   assert.equal(r.status, 0, r.stderr);
   const result = readJson(out);
   assert.equal(result.cases[0].decision, 'regression');
+});
+
+test('confidence_interval：alpha 只改 level/区间，p 值、BH 校正、decision、suite 汇总与归因不变', () => {
+  const dir = tempDir();
+  writeCollect(dir, 'a-b.json', [1, 2, 3]);
+  writeCollect(dir, 'a-c.json', [4, 5, 6]);
+  writeCollect(dir, 'b-b.json', [100, 102, 98]);
+  writeCollect(dir, 'b-c.json', [120, 122, 118]);
+  const manifest = writeManifest(dir, 'm.json', [
+    { name: 'a', baseline: 'a-b.json', candidate: 'a-c.json' },
+    { name: 'b', baseline: 'b-b.json', candidate: 'b-c.json' },
+  ]);
+  const run = (alpha) => {
+    const out = path.join(dir, `o-${alpha}.json`);
+    const rr = runCli(['--manifest', manifest, '--output', out, '--alpha', String(alpha)]);
+    assert.equal(rr.status, 0, rr.stderr);
+    return readJson(out);
+  };
+  const r95 = run(0.05);
+  const r90 = run(0.1);
+  assert.equal(r95.cases[0].delta.mean.confidence_interval.level, 0.95);
+  assert.equal(r90.cases[0].delta.mean.confidence_interval.level, 0.9);
+  // 除区间外逐字段一致
+  for (let i = 0; i < r95.cases.length; i++) {
+    assert.deepEqual(r95.cases[i].welch, r90.cases[i].welch);
+    assert.equal(r95.cases[i].adjusted_p_value, r90.cases[i].adjusted_p_value);
+    assert.equal(r95.cases[i].decision, r90.cases[i].decision);
+    assert.equal(r95.cases[i].delta.mean.ns, r90.cases[i].delta.mean.ns);
+    assert.equal(r95.cases[i].delta.mean.percent, r90.cases[i].delta.mean.percent);
+    assert.deepEqual(r95.cases[i].attribution, r90.cases[i].attribution);
+    const w95 = r95.cases[i].delta.mean.confidence_interval.upper_ns
+      - r95.cases[i].delta.mean.confidence_interval.lower_ns;
+    const w90 = r90.cases[i].delta.mean.confidence_interval.upper_ns
+      - r90.cases[i].delta.mean.confidence_interval.lower_ns;
+    assert.ok(w90 < w95);
+  }
+  assert.deepEqual(r95.suite_summary, r90.suite_summary);
+  assert.deepEqual(r95.suite_attribution, r90.suite_attribution);
 });
 
 test('--key=value 形式与默认 alpha/min-change-percent', () => {
