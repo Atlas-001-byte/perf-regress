@@ -16,6 +16,8 @@
 `perf-regress ab-suite`、配对交错 A/B 子命令
 `perf-regress ab-paired`、多场景配对交错 A/B 套件子命令
 `perf-regress ab-paired-suite`（零依赖 Node.js）。
+另有供程序化调用的回归分组归因库 `lib/regression-attribution.js`
+（Mann-Whitney U + Holm，纯函数、不读写文件、不新增子命令）。
 
 ## 用法
 
@@ -598,6 +600,102 @@ manifest 校验口径（非空唯一 `name`、非空 `baseline_command`/`candida
   全部 case 不可比较时三项百分比均为 `null`、`dominant_factor` 为 `none`。
 - 退出码：存在 measure 错误或任一 case 完整 pairs 少于 2 时写完整 JSON 并退出 3；
   否则退出 0；`--output` 写入失败退出码 4。
+
+## 回归分组归因（库 API）
+
+`lib/regression-attribution.js` 在**既有比较结论之上**做增量归因：对一次
+已判定的比较，按分类维度（如 `build`、`host`、`scenario`）独立归因，
+指出最值得继续排查的样本分组。它是纯函数库：
+
+- 不新增 CLI 子命令，不改变任何现有子命令的入口调用方式、输入输出字段、
+  字段顺序、样本筛选口径、显著性判定、回归阈值或无归因时的检测结论；
+- 只有调用方显式调用 `attributeRegression` 时才进行归因计算；
+- 不执行命令、不读写文件，不新增任何落盘行为。
+
+```js
+const {
+  attributeRegression,
+  InvalidAttributionInputError,
+} = require('./lib/regression-attribution');
+
+const result = attributeRegression(request, comparisonRef /* 可选 */);
+```
+
+### 请求结构
+
+`request` 为对象：
+
+- `metric`：非空字符串，必须与待归因的原比较一致；
+- `comparison`：非空字符串，必须与待归因的原比较一致；
+- `decision`：原比较结论，仅原样回显、不参与计算；可省略或为 `null`
+  （此时输出 `decision` 为 `null`）；也可经 `comparisonRef.decision` 提供；
+- `samples`：样本数组，每项含
+  - `side`：`"baseline"` 或 `"candidate"`；
+  - `value`：观测量，必须是有限数字；
+  - `dimensions`：可选。该样本在各维度上的分类，支持两种写法：
+    - 对象映射：`{ "build": "b1", "host": "h1" }`，每个样本在一个维度中
+      只能有一个维度值，维度值必须是有限字符串（空维度名非法）；
+    - 键值对数组：`[{ "key": "build", "value": "b1" }, ...]`，
+      同一样本内 `key` 重复即“重复维度键”错误。
+  - 不携带 `dimensions`（或为 `null`）的样本不参与任何维度归因。
+
+`comparisonRef` 可选，用于携带原比较上下文：其 `metric`、`comparison`
+（或 `id`）若为字符串则与请求逐一字面校验，不一致抛
+`InvalidAttributionInputError`；`decision` 为字符串时在请求未给定时作为
+回显结论。
+
+### 归因口径
+
+- 各维度**独立**归因，维度按其在输入中首次出现的顺序输出。
+- 仅纳入某维度值在基线侧和候选侧**都至少有 3 个观测值**的有效值；
+  任一侧不足 3 个的维度值被跳过，明细中 `evidence_status` 标为
+  `insufficient_samples`，不阻断其他维度值与其他维度。
+- 对每个有效值计算：
+  - 两侧样本中位数差 `median_diff`（候选中位数 − 基线中位数）；
+  - 合并样本权重 `weight = baseline_count + candidate_count`；
+  - Mann–Whitney U **双侧** p 值 `p_value`（小样本用精确置换分布，
+    并列取平均秩；大样本用含结校正的正态近似）；
+  - 同一维度内对各有效值的原始 p 用 **Holm** 方法校正，得
+    `adjusted_p_value`（仅含有效值，保留六位小数）；
+  - 贡献值 `contribution = weight * median_diff`。
+- 明细 `entries` 按**贡献值降序**输出，贡献相同按维度值的 UTF-8 字节序；
+  `insufficient_samples` 项排在有效值之后，按维度值 UTF-8 字节序。
+  数值字段（`median_diff`、`p_value`、`adjusted_p_value`、`contribution`）
+  保留六位小数，`weight`/计数为整数。
+
+### 首要归因与证据状态
+
+某维度值只有同时满足以下三条才标为首要归因（`primary_attribution`）：
+
+1. 贡献值为正；
+2. `adjusted_p_value < 0.05`；
+3. 贡献值不低于该维度所有正贡献之和的 30%。
+
+若满足条件的最高贡献项在 `1e-12` 精度内并列，则**不擅自挑选**，把并列项
+全部列为首要归因候选（`primary_attributions`），并按维度值的 UTF-8 字节序
+稳定排序。没有任何维度值达到条件时，该维度与顶层 `evidence_status` 均为
+`insufficient_evidence`；这不是异常。任一维度存在首要归因时，顶层
+`evidence_status` 为 `primary_attribution`。
+
+### 输出结构
+
+顶层固定字段：`metric`、`comparison`、`decision`、`evidence_status`、
+`dimensions`。`dimensions` 每项固定含 `dimension`、`evidence_status`、
+`primary_attributions`、`entries`；`entries` 每项固定含 `dimension_value`、
+`evidence_status`（`primary_attribution` / `not_primary` /
+`insufficient_samples`）、`baseline_count`、`candidate_count`、
+`median_diff`、`p_value`、`adjusted_p_value`、`weight`、`contribution`
+（`insufficient_samples` 项后五项统计字段为 `null`）。
+
+### 输入错误
+
+下列情形统一抛出 `InvalidAttributionInputError`，错误信息指出**第一个按输入
+顺序出现**的具体字段路径（挂在 `err.fieldPath`，如 `samples[0].value`、
+`samples[2].dimensions[1].key`）：缺少 `metric`、`comparison`、`side` 或
+样本 `value`；存在重复维度键；样本 `value` 不是有限数字；维度值不是有限
+字符串；整个请求没有任何有效维度值；`metric`/`comparison` 与原比较不一致。
+部分维度值样本不足不属于输入错误。同一输入多次调用产生完全相同的归因顺序、
+数值与证据状态。
 
 ## 约定
 

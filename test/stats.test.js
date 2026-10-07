@@ -226,3 +226,100 @@ test('pairedMeanInterval: 区间围绕差值均值，level 随 alpha 变化', ()
   assert.ok(Math.abs(r95.lower_percent - r95.lower_ns) < 1e-9);
   assert.ok(Math.abs(r95.upper_percent - r95.upper_ns) < 1e-9);
 });
+
+// ---- Mann-Whitney U / Holm ----
+
+const { mannWhitneyUTwoSided, holmAdjust } = require('../lib/stats');
+
+test('mannWhitneyUTwoSided: 完全分离小样本的精确双侧 p（无并列）', () => {
+  // n=m=2，U=0 -> 2 / C(4,2) = 1/3
+  assert.equal(mannWhitneyUTwoSided([1, 2], [3, 4]).u, 0);
+  assert.equal(mannWhitneyUTwoSided([1, 2], [3, 4]).z, null);
+  assert.ok(Math.abs(mannWhitneyUTwoSided([1, 2], [3, 4]).p_value - 1 / 3) < 1e-12);
+  // n=m=3，U=0 -> 2 / C(6,3) = 0.1
+  assert.ok(Math.abs(mannWhitneyUTwoSided([1, 2, 3], [4, 5, 6]).p_value - 0.1) < 1e-12);
+  // n=m=4，U=0 -> 2 / C(8,4) = 0.028571
+  assert.ok(Math.abs(mannWhitneyUTwoSided([1, 2, 3, 4], [5, 6, 7, 8]).p_value
+    - 2 / 70) < 1e-12);
+  // n=m=5，U=0 -> 2 / C(10,5) = 0.007937
+  assert.ok(Math.abs(mannWhitneyUTwoSided([1, 2, 3, 4, 5], [6, 7, 8, 9, 10]).p_value
+    - 2 / 252) < 1e-12);
+});
+
+test('mannWhitneyUTwoSided: U=1 的精确双侧 p', () => {
+  // [1,2,3,5] vs [4,6,7,8]：U=1，p = 4 / C(8,4) = 0.057143
+  const r = mannWhitneyUTwoSided([1, 2, 3, 5], [4, 6, 7, 8]);
+  assert.equal(r.u, 1);
+  assert.ok(Math.abs(r.p_value - 4 / 70) < 1e-12);
+});
+
+test('mannWhitneyUTwoSided: 对调两侧结果一致（U 取较小者）', () => {
+  const a = mannWhitneyUTwoSided([1, 2, 3, 5], [4, 6, 7, 8]);
+  const b = mannWhitneyUTwoSided([4, 6, 7, 8], [1, 2, 3, 5]);
+  assert.equal(a.u, b.u);
+  assert.ok(Math.abs(a.p_value - b.p_value) < 1e-12);
+});
+
+test('mannWhitneyUTwoSided: 并列取平均秩；全部并列 p=1', () => {
+  // [1,1] vs [1,2]：一个并列在低端，秩 2,2,2,4... U=1 且无方向优势 -> p=1
+  assert.equal(mannWhitneyUTwoSided([1, 1], [1, 2]).p_value, 1);
+  assert.equal(mannWhitneyUTwoSided([1, 1], [1, 1]).p_value, 1);
+  // 成结但仍完全分离：[1,1,1,2] vs [3,3,3,3]，U=0 -> 2/70
+  assert.ok(Math.abs(mannWhitneyUTwoSided([1, 1, 1, 2], [3, 3, 3, 3]).p_value
+    - 2 / 70) < 1e-12);
+});
+
+test('mannWhitneyUTwoSided: N>40 走含结校正的正态近似，返回 z 且 p 在 (0,1)', () => {
+  const x = Array.from({ length: 30 }, (_, i) => i);
+  const y = Array.from({ length: 30 }, (_, i) => i + 10);
+  const r = mannWhitneyUTwoSided(x, y);
+  assert.equal(typeof r.z, 'number');
+  assert.ok(r.p_value > 0 && r.p_value < 1);
+});
+
+test('mannWhitneyUTwoSided: N>40 时返回 z 且 p 随分离程度减小', () => {
+  const mk = (shift) => [
+    Array.from({ length: 25 }, (_, i) => i),
+    Array.from({ length: 25 }, (_, i) => i + shift),
+  ];
+  const near = mannWhitneyUTwoSided(...mk(1));
+  const far = mannWhitneyUTwoSided(...mk(20));
+  assert.equal(typeof near.z, 'number');
+  assert.equal(typeof far.z, 'number');
+  assert.ok(far.z > near.z);
+  assert.ok(far.p_value < near.p_value);
+  assert.ok(near.p_value > 0 && near.p_value <= 1);
+});
+
+test('mannWhitneyUTwoSided: 精确与近似在 N=40 边界处连续（同形数据）', () => {
+  const mk = (n) => [
+    Array.from({ length: n }, (_, i) => i),
+    Array.from({ length: n }, (_, i) => i + 5),
+  ];
+  const exact = mannWhitneyUTwoSided(...mk(20)); // N=40
+  const approx = mannWhitneyUTwoSided(...mk(21)); // N=42
+  // 两 p 同数量级，且均落在 (0,1)
+  assert.ok(exact.p_value > 0 && exact.p_value < 1);
+  assert.ok(approx.p_value > 0 && approx.p_value < 1);
+  assert.ok(Math.abs(Math.log(exact.p_value) - Math.log(approx.p_value)) < 1);
+});
+
+test('holmAdjust: 逐步向下校正并映回原序，保留六位小数', () => {
+  // p = [0.01, 0.04, 0.03]，m=3：
+  // 秩1(0.01): 3*0.01=0.03；秩2(0.03): 2*0.03=0.06；秩3(0.04): 0.04
+  assert.deepEqual(holmAdjust([0.01, 0.04, 0.03]), [0.03, 0.06, 0.06]);
+});
+
+test('holmAdjust: 单调且不小于原始 p，上限为 1', () => {
+  const raw = [0.5, 0.0001, 0.2, 0.0002];
+  const adj = holmAdjust(raw);
+  adj.forEach((q, i) => assert.ok(q >= Math.round(raw[i] * 1e6) / 1e6 - 1e-9));
+  adj.forEach((q) => assert.ok(q <= 1));
+});
+
+test('holmAdjust: 相同 p 按原序稳定处理，确定可复现', () => {
+  const a = holmAdjust([0.01, 0.01, 0.5]);
+  const b = holmAdjust([0.01, 0.01, 0.5]);
+  assert.deepEqual(a, b);
+  assert.deepEqual(a, [0.03, 0.03, 0.5]);
+});
