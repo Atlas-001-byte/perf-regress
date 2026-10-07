@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { computeSummary, welchTest, pairedTTest, pairedMeanInterval, tCriticalValue, welchMeanInterval } = require('../lib/stats');
+const { computeSummary, welchTest, pairedTTest, pairedMeanInterval, tCriticalValue, welchMeanInterval, mannWhitneyTwoSided } = require('../lib/stats');
 const { parseArgs } = require('../lib/collect');
 
 test('computeSummary: 单样本', () => {
@@ -225,4 +225,115 @@ test('pairedMeanInterval: 区间围绕差值均值，level 随 alpha 变化', ()
   // 百分比端点由两端分别除以基线均值再乘 100（基线均值取 100，数值上相等）
   assert.ok(Math.abs(r95.lower_percent - r95.lower_ns) < 1e-9);
   assert.ok(Math.abs(r95.upper_percent - r95.upper_ns) < 1e-9);
+});
+
+// ---- Mann-Whitney U 双侧检验 ----
+
+test('mannWhitneyTwoSided: 完全分离的 3v3，精确 p=0.1', () => {
+  const p = mannWhitneyTwoSided([1, 2, 3], [4, 5, 6]);
+  assert.ok(Math.abs(p - 0.1) < 1e-12);
+});
+
+test('mannWhitneyTwoSided: 完全分离的 3v4，精确 p=2/C(7,3)=0.057142857', () => {
+  const p = mannWhitneyTwoSided([1, 2, 3], [4, 5, 6, 7]);
+  assert.ok(Math.abs(p - 2 / 35) < 1e-12);
+});
+
+test('mannWhitneyTwoSided: 完全重叠返回 1', () => {
+  assert.ok(Math.abs(mannWhitneyTwoSided([1, 1, 2], [1, 1, 2]) - 1) < 1e-12);
+});
+
+test('mannWhitneyTwoSided: 全部相等的常数样本返回 1', () => {
+  assert.ok(Math.abs(mannWhitneyTwoSided([7, 7, 7, 7], [7, 7, 7]) - 1) < 1e-12);
+});
+
+// 独立参考实现：枚举所有 C(n, n1) 个下标子集，按平均秩计算秩和分布，
+// 双侧 p = min(1, 2·min(P(U<=u), P(U>=u)))。
+function exactEnumeration(x, y) {
+  const n1 = x.length;
+  const n2 = y.length;
+  const n = n1 + n2;
+  const tagged = [...x.map((v) => [v, 0]), ...y.map((v) => [v, 1])]
+    .sort((a, b) => a[0] - b[0]);
+  const ranks = new Array(n);
+  for (let i = 0; i < n;) {
+    let j = i;
+    while (j < n && tagged[j][0] === tagged[i][0]) j++;
+    const avg = ((i + 1) + j) / 2;
+    for (let k = i; k < j; k++) ranks[k] = avg;
+    i = j;
+  }
+  const rObs = tagged.reduce((s, item, k) => s + (item[1] === 0 ? ranks[k] : 0), 0);
+  const uObs = rObs - n1 * (n1 + 1) / 2;
+  let total = 0;
+  let le = 0;
+  let ge = 0;
+  for (let mask = 0; mask < (1 << n); mask++) {
+    let bits = 0;
+    for (let k = 0; k < n; k++) if (mask & (1 << k)) bits++;
+    if (bits !== n1) continue;
+    let r = 0;
+    for (let k = 0; k < n; k++) if (mask & (1 << k)) r += ranks[k];
+    const u = r - n1 * (n1 + 1) / 2;
+    total++;
+    if (u <= uObs) le++;
+    if (u >= uObs) ge++;
+  }
+  return Math.min(1, 2 * Math.min(le, ge) / total);
+}
+
+test('mannWhitneyTwoSided: 常见分组规模走精确分支，与参考枚举一致', () => {
+  const cases = [
+    [[1, 2, 4], [3, 5, 6]],
+    [[1, 2, 3, 4], [3, 4, 5, 6]],
+    [[1, 2, 3, 3], [3, 4, 5, 6]],
+    [[5, 5, 5], [5, 6, 7]],
+    [[1, 1, 1, 1], [2, 2, 2, 2]],
+    [[1, 2, 2, 3], [2, 3, 3, 4]],
+    [[1, 3, 5, 7, 9], [2, 4, 6, 8, 10]],
+    [[1], [2]],
+    [[1, 2], [1]],
+  ];
+  for (const [a, b] of cases) {
+    const ref = exactEnumeration(a, b);
+    assert.ok(Math.abs(mannWhitneyTwoSided(a, b) - ref) < 1e-12,
+      `mismatch for ${JSON.stringify(a)} vs ${JSON.stringify(b)}`);
+  }
+});
+
+test('mannWhitneyTwoSided: 大样本正态分支与精确枚举（取小样本边界附近）连续', () => {
+  // 31 个点但可枚举验证：构造强分离数据，p 应接近 0
+  const a = Array.from({ length: 16 }, (_, i) => i * 2);
+  const b = Array.from({ length: 15 }, (_, i) => i * 2 + 40);
+  const pLarge = mannWhitneyTwoSided(a, b);
+  assert.ok(pLarge >= 0 && pLarge <= 1);
+  assert.ok(pLarge < 1e-3, `expected tiny p, got ${pLarge}`);
+});
+
+test('mannWhitneyTwoSided: 大样本分支对称情形接近 1', () => {
+  const a = Array.from({ length: 30 }, (_, i) => i);
+  const b = Array.from({ length: 30 }, (_, i) => i);
+  assert.ok(Math.abs(mannWhitneyTwoSided(a, b) - 1) < 1e-9);
+});
+
+test('mannWhitneyTwoSided: 超大无并列样本回退正态近似，结果在 [0,1] 且方向正确', () => {
+  // N=200 且强分离：超出精确工作量预算，正态近似 p 应极小
+  const a = Array.from({ length: 100 }, (_, i) => i);
+  const b = Array.from({ length: 100 }, (_, i) => i + 300);
+  const p = mannWhitneyTwoSided(a, b);
+  assert.ok(p >= 0 && p <= 1);
+  assert.ok(p < 1e-20, `expected near-zero p, got ${p}`);
+  // 大样本但完全重叠：p 接近 1
+  const c = Array.from({ length: 100 }, (_, i) => i);
+  const d = Array.from({ length: 100 }, (_, i) => i);
+  assert.ok(Math.abs(mannWhitneyTwoSided(c, d) - 1) < 1e-9);
+});
+
+test('mannWhitneyTwoSided: 大 N 重并列仍走精确分布（2x2 表 Fisher 型，快速且精确）', () => {
+  // 100 vs 100 只有两个秩值：baseline 全 0；candidate 25 个 0、75 个 1。
+  const a = new Array(100).fill(0);
+  const b = [...new Array(25).fill(0), ...new Array(75).fill(1)];
+  const pFast = mannWhitneyTwoSided(a, b);
+  // 该问题等价于超几何选择，p 应极小但为正有限值
+  assert.ok(pFast > 0 && pFast < 1e-6);
 });

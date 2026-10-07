@@ -15,7 +15,8 @@
 `perf-regress ab`、多场景交错 A/B 套件子命令
 `perf-regress ab-suite`、配对交错 A/B 子命令
 `perf-regress ab-paired`、多场景配对交错 A/B 套件子命令
-`perf-regress ab-paired-suite`（零依赖 Node.js）。
+`perf-regress ab-paired-suite`，以及回归分组归因子命令
+`perf-regress attribute`（零依赖 Node.js）。
 
 ## 用法
 
@@ -83,6 +84,10 @@ node bin/perf-regress.js ab-paired-suite \
   --output <套件结果.json> \
   [--alpha <显著性水平>] \
   [--min-change-percent <阈值百分比>]
+
+node bin/perf-regress.js attribute \
+  --request <归因请求.json> \
+  --output <归因结果.json>
 ```
 
 - `--command`：被测命令，经系统 shell 执行，必填，非空。
@@ -230,6 +235,106 @@ stdout/stderr、samples/summary/errors 字段口径均与 collect 相同。
   `dominant_factor` 取三者中最大正向项（`central_tendency` / `tail_latency` /
   `variability`），平手按此顺序，百分比为 `null` 视为无穷大正向，
   无正向值为 `none`。
+
+## attribute 子命令
+
+对一次已判定（或重新判定）为回归的比较，按样本的分类维度给出分组级回归
+归因：指出最值得继续排查的维度值（如某个 build、host、scenario）。
+attribute 是独立的新增入口，不改变 collect/compare/ab 等任何既有入口的
+调用方式、输入输出字段、样本筛选口径、显著性阈值与无归因信息时的检测结论；
+原有回归阈值与字段顺序均不因本命令而变化，命令本身也不产生任何落盘副作用
+（除显式指定的 `--output`）。
+
+- `--request`：归因请求 JSON（UTF-8），必填，非空。
+- `--output`：归因结果 JSON 输出文件，必填，非空。
+- 参数同时支持 `--key value` 与 `--key=value` 两种写法。
+
+### 请求 JSON（UTF-8）
+
+顶层字段：
+
+- `metric`：必填，非空字符串，待归因原比较的指标标识；
+- `comparison`：必填，非空字符串，待归因原比较的标识；
+- `samples`：必填，非空数组，元素为同一次比较使用的基线与候选样本，顺序
+  任意但决定多类错误并存时报告的字段路径：
+  - `side`：必填，`"baseline"` 或 `"candidate"`；
+  - `value`：必填，观测值，必须是有限数字（`NaN`/`Infinity`/布尔/字符串均
+    非法）；注意这里不要求 compare 采集口径中的非负安全整数；
+  - `dimensions`：可选，维度名到维度值的对象；每个样本在一个维度中只能有
+    一个维度值——维度键重复即非法（即使是 JSON 语法允许的重复键）；维度值
+    必须为字符串；
+- `alpha` / `min_change_percent`：可选，分别缺省 `0.05` 与 `5`，口径与
+  compare 同名参数一致，仅用于由请求样本重算原比较结论；不提供时与 compare
+  默认口径完全一致。
+
+两侧样本分别至少 2 个（重算 Welch 比较的前提），且整个请求至少含一个有效
+维度值，否则按非法输入处理。
+
+非法输入统一抛出 `InvalidAttributionInputError`：CLI 以 stderr 一条原因、
+退出码 2 退出且不创建或改写 `--output`，原因中指出第一个按输入顺序出现的
+具体字段路径（路径形如 `metric`、`comparison`、`samples[3].side`、
+`samples[1].dimensions.host`；顶层标识先于样本检查，样本按下标升序、同一样本
+内按 `side` → `value` → `dimensions` 的顺序）。非法情形包括：缺少 `metric`、
+`comparison`、`side` 或样本 `value`；存在重复维度键；样本值不是有限数字；
+整个请求没有任何有效维度值。文件不是合法 JSON 同样退出码 2。
+
+### 归因口径
+
+- 按每个维度独立归因，维度之间互不影响。维度输出顺序按维度名 UTF-8 字节序。
+- 维度值只在基线侧与候选侧都至少有 **3** 个观测时纳入统计；任一侧不足 3 个
+  的维度值跳过统计，仅在该维度明细中以 `evidence: "insufficient_samples"`
+  列出（计数照常给出，统计字段为 `null`），不阻断其他维度值或其他维度。
+- 对每个有效维度值计算：
+  - 两侧样本中位数差 `median_diff`（候选中位数减基线中位数，中位数为偶数取
+    中间两值平均，与 collect 口径一致）；
+  - 合并样本权重 `weight` = 基线样本数 + 候选样本数；
+  - Mann–Whitney U 双侧检验 p 值（按平均秩的精确秩和分布计算；并列较多或
+    样本较大导致精确枚举超出固定工作量预算时，回退到含 tie 修正与连续性
+    校正的正态近似；常见分组规模均走精确解）；
+  - 同一维度内对各维度值的原始 p 值用 Holm 方法校正，`adjusted_p_value`
+    （保留六位小数）。
+  - 贡献值 `contribution` = `weight × median_diff`。
+- 维度内 `rankings` 按贡献值降序；贡献值相同按维度值的 UTF-8 字节序升序；
+  `insufficient_samples` 行附在该维度有效行之后，按维度值 UTF-8 字节序。
+- 维度值同时满足以下三个条件才具备首要归因资格：贡献值为正；
+  `adjusted_p_value < 0.05`；贡献值不低于该维度所有正贡献之和
+  （`positive_contribution_sum`）的 **30%**。
+- 全部资格行中贡献值最高者标为首要归因；若最高贡献在 `1e-12` 绝对精度内
+  并列，并列项全部列为首要归因候选，不擅自选择；首要归因列表按维度值
+  UTF-8 字节序（同值跨维度再按维度名 UTF-8 字节序）稳定排序。
+- 明细行 `evidence` 取值：`primary`（首要归因）、`eligible`（通过本维度
+  三道门但非全局最高贡献）、`ranked`（参与统计但未通过三门）、
+  `insufficient_samples`（任一侧不足 3 个）。
+- 没有任何维度值达到首要条件时，`evidence_status` 为 `insufficient_evidence`，
+  `primary_attributions` 为 `[]`；这不是异常，退出码仍为 0。归因结果不因原
+  比较不是 regression 而报错——结论照常重算并保留，是否给出首要归因完全由
+  上述三门与最高贡献规则决定。
+
+同一输入多次调用得到完全相同的维度顺序、排名、数值与证据状态；除写出
+`--output` 外不新增任何落盘行为。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`metric`、`comparison`、`baseline_summary`、
+`candidate_summary`、`welch`、`decision`、`attribution`。
+
+- `metric` / `comparison`：回显请求标识。
+- `baseline_summary` / `candidate_summary`：按请求两侧全部样本以 collect
+  summary 七项口径重算的结果（不读取任何外部 summary）。
+- `welch` / `decision`：与 compare 完全相同的双侧 Welch 检验与四类 decision
+  口径（`alpha` / `min_change_percent` 缺省与 compare 一致）。
+- `attribution`：
+  - `evidence_status`：`primary_attribution` 或 `insufficient_evidence`；
+  - `dimensions`：逐维度对象，含 `dimension`、`positive_contribution_sum`、
+    `primary_candidates`（该维度被列为首要归因的维度值，按 UTF-8 字节序）、
+    `rankings`；每个 ranking 含 `value`、`baseline_count`、`candidate_count`、
+    `median_diff`、`weight`、`contribution`、`adjusted_p_value`、`evidence`；
+  - `primary_attributions`：跨维度首要归因列表，每项含 `dimension`、`value`、
+    `median_diff`、`weight`、`contribution`、`adjusted_p_value`；无首要归因时
+    为 `[]`。
+
+成功退出码 0；请求/输入无效退出码 2（不创建或改写 `--output`）；
+`--output` 写入失败退出码 4。
 
 ## compare-suite 子命令
 
