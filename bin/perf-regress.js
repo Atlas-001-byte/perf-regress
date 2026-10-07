@@ -36,7 +36,7 @@ collect-suite：按 manifest 顺序批量采集多个基准场景，含逐 case 
 compare：比较两份 collect JSON，输出显著性、回归判定与变化归因。
 compare-suite：按 manifest 批量比较多对 collect JSON，含 BH 校正与套件级汇总。
 compare-series：定位每个 case 的候选序列相对固定 baseline 的回归起点，
-    全部候选统一 BH 校正，含套件级汇总与归因。
+    全部候选统一 BH 校正，含连续回归段（持续/暂态）、归因变迁与时间线汇总。
 ab：基线与候选同批交替测量（先全部预热再测量，每轮先 baseline 后 candidate），
     输出两侧采集结果与即时比较。
 ab-suite：按 manifest 串行执行多个交错 A/B 场景，含 BH 校正、套件汇总与归因。

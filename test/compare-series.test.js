@@ -7,8 +7,16 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { benjaminiHochberg } = require('../lib/compare-suite');
+const {
+  benjaminiHochberg,
+} = require('../lib/compare-suite');
 const { welchTest } = require('../lib/stats');
+const {
+  analyzeTrend,
+  attributionTransitions,
+  caseAttribution,
+  suiteDominantFactor,
+} = require('../lib/compare-series');
 
 const BIN = path.join(__dirname, '..', 'bin', 'perf-regress.js');
 
@@ -46,6 +54,162 @@ function readJson(p) {
   return JSON.parse(fs.readFileSync(p, 'utf8'));
 }
 
+// 构造只带 dominant_factor 的伪候选报告。
+function factorCand(factor) {
+  return { attribution: { dominant_factor: factor } };
+}
+
+// 构造只带三项归因百分比的伪候选报告。
+function attrCand(central, tail, variability) {
+  return {
+    attribution: {
+      central_tendency_percent: central,
+      tail_latency_percent: tail,
+      variability_percent: variability,
+    },
+  };
+}
+
+test('analyzeTrend：连续 regression 切分，持续段与暂态段及 recovery_index', () => {
+  assert.deepEqual(analyzeTrend([]), {
+    regressionRuns: [], transientRuns: [], persistentStart: null,
+  });
+  assert.deepEqual(analyzeTrend(['not_significant', 'improvement']), {
+    regressionRuns: [], transientRuns: [], persistentStart: null,
+  });
+  // 单候选 regression 即持续到末尾
+  assert.deepEqual(analyzeTrend(['regression']), {
+    regressionRuns: [{ start_index: 0, end_index: 0, extends_to_end: true }],
+    transientRuns: [],
+    persistentStart: 0,
+  });
+  // 段后恢复 -> 暂态，recovery_index 为段后首个 index
+  assert.deepEqual(analyzeTrend(['regression', 'not_significant']), {
+    regressionRuns: [{ start_index: 0, end_index: 0, extends_to_end: false }],
+    transientRuns: [{ start_index: 0, end_index: 0, recovery_index: 1 }],
+    persistentStart: null,
+  });
+  // 暂态段后再出现持续段：两段都在 regression_runs，只有末段写起点
+  assert.deepEqual(
+    analyzeTrend(['regression', 'not_significant', 'regression', 'regression']),
+    {
+      regressionRuns: [
+        { start_index: 0, end_index: 0, extends_to_end: false },
+        { start_index: 2, end_index: 3, extends_to_end: true },
+      ],
+      transientRuns: [{ start_index: 0, end_index: 0, recovery_index: 1 }],
+      persistentStart: 2,
+    });
+  // 长暂态段 recovery_index 指向 end_index + 1；末尾另起一段为持续
+  assert.deepEqual(
+    analyzeTrend(['regression', 'regression', 'not_significant', 'regression']),
+    {
+      regressionRuns: [
+        { start_index: 0, end_index: 1, extends_to_end: false },
+        { start_index: 3, end_index: 3, extends_to_end: true },
+      ],
+      transientRuns: [{ start_index: 0, end_index: 1, recovery_index: 2 }],
+      persistentStart: 3,
+    });
+});
+
+test('attributionTransitions：相邻 dominant_factor 变化（含 none 双向），无变化为 []', () => {
+  assert.deepEqual(attributionTransitions([factorCand('none')]), []);
+  assert.deepEqual(
+    attributionTransitions([
+      factorCand('none'),
+      factorCand('central_tendency'),
+      factorCand('tail_latency'),
+      factorCand('tail_latency'),
+      factorCand('none'),
+    ]),
+    [
+      { from_index: 0, to_index: 1,
+        from_factor: 'none', to_factor: 'central_tendency' },
+      { from_index: 1, to_index: 2,
+        from_factor: 'central_tendency', to_factor: 'tail_latency' },
+      { from_index: 3, to_index: 4,
+        from_factor: 'tail_latency', to_factor: 'none' },
+    ]);
+});
+
+test('caseAttribution：无持续段四项 null；有持续段取段内中位数与平手顺序', () => {
+  assert.deepEqual(caseAttribution([attrCand(10, 20, 30)], null), {
+    central_tendency_percent: null,
+    tail_latency_percent: null,
+    variability_percent: null,
+    dominant_factor: null,
+  });
+
+  // 偶数段取中间两值平均：[10,20] -> 15
+  const seg2 = [attrCand(10, 10, 0), attrCand(20, 20, 0)];
+  assert.deepEqual(caseAttribution(seg2, 0), {
+    central_tendency_percent: 15,
+    tail_latency_percent: 15,
+    variability_percent: 0,
+    dominant_factor: 'central_tendency', // central 与 tail 平手 -> central
+  });
+
+  // 三候选中位数；central 与 tail 中位均 10 平手按顺序取 central
+  const segTail = [
+    attrCand(5, 0, 0),
+    attrCand(10, 10, 0),
+    attrCand(20, 20, 0),
+  ];
+  assert.deepEqual(caseAttribution(segTail, 0), {
+    central_tendency_percent: 10,
+    tail_latency_percent: 10,
+    variability_percent: 0,
+    dominant_factor: 'central_tendency', // 10 平手仍按顺序取 central
+  });
+  const segTailWins = [
+    attrCand(0, 10, 5),
+    attrCand(5, 20, 0),
+    attrCand(2, 30, 3),
+  ];
+  // central 中位 5，tail 中位 20，variability 中位 3 -> tail
+  assert.equal(caseAttribution(segTailWins, 0).dominant_factor, 'tail_latency');
+  // variability 最大
+  const segVar = [attrCand(5, 5, 10), attrCand(0, 0, 20)];
+  assert.equal(caseAttribution(segVar, 0).dominant_factor, 'variability');
+  // 无正值 -> none
+  const segNone = [attrCand(-5, -2, 0), attrCand(0, -3, -8)];
+  const noneAttr = caseAttribution(segNone, 0);
+  assert.equal(noneAttr.dominant_factor, 'none');
+
+  // null 按正无穷参与中位数：[10,20,null] 中位 20；[null,null] 中位 null
+  assert.equal(caseAttribution(
+    [attrCand(10, 0, 0), attrCand(20, 0, 0), attrCand(null, 0, 0)], 0)
+    .central_tendency_percent, 20);
+  const infAttr = caseAttribution(
+    [attrCand(null, 0, 0), attrCand(null, 0, 0)], 0);
+  assert.equal(infAttr.central_tendency_percent, null);
+  assert.equal(infAttr.dominant_factor, 'central_tendency');
+});
+
+test('suiteDominantFactor：非 null 值多数决，平手按固定顺序，全 null 为 none', () => {
+  const caseWith = (factor) => ({ case_attribution: { dominant_factor: factor } });
+  assert.equal(suiteDominantFactor([caseWith(null), caseWith(null)]), 'none');
+  assert.equal(suiteDominantFactor([caseWith('none')]), 'none');
+  assert.equal(
+    suiteDominantFactor([caseWith('central_tendency'), caseWith('none'),
+      caseWith('none')]),
+    'none'); // none 两票
+  assert.equal(
+    suiteDominantFactor([caseWith('central_tendency'),
+      caseWith('central_tendency'), caseWith('tail_latency')]),
+    'central_tendency');
+  // 三类各一票平手 -> central
+  assert.equal(
+    suiteDominantFactor([caseWith('central_tendency'),
+      caseWith('tail_latency'), caseWith('variability')]),
+    'central_tendency');
+  // tail 与 variability 平手 -> tail
+  assert.equal(
+    suiteDominantFactor([caseWith('variability'), caseWith('tail_latency')]),
+    'tail_latency');
+});
+
 test('系列成功：结构、字段顺序、固定 baseline、index 从 0 起与零方差退化判定', () => {
   const dir = tempDir();
   const aBase = writeCollect(dir, 'a-base.json', [100, 100, 100]);
@@ -62,13 +226,14 @@ test('系列成功：结构、字段顺序、固定 baseline、index 从 0 起�
   assert.equal(r.status, 0, r.stderr);
 
   const result = readJson(out);
-  assert.deepEqual(Object.keys(result), ['cases', 'suite_summary', 'suite_attribution']);
+  assert.deepEqual(Object.keys(result), ['cases', 'timeline_summary']);
   assert.equal(result.cases.length, 2);
 
   assert.deepEqual(result.cases.map((c) => c.name), ['alpha', 'beta']);
   for (const c of result.cases) {
     assert.deepEqual(Object.keys(c),
-      ['name', 'command', 'baseline_summary', 'candidates', 'first_regression_index']);
+      ['name', 'command', 'baseline_summary', 'candidates',
+        'trend_analysis', 'case_attribution']);
     assert.equal(c.command, 'true');
   }
 
@@ -105,8 +270,26 @@ test('系列成功：结构、字段顺序、固定 baseline、index 从 0 起�
   assert.deepEqual(alpha.candidates[1].delta.mean.confidence_interval, {
     level: 0.95, lower_ns: 20, upper_ns: 20, lower_percent: 20, upper_percent: 20,
   });
-  // 首个 regression 在 index 1
-  assert.equal(alpha.first_regression_index, 1);
+
+  // alpha：regression 仅在末尾 index 1 -> 单段持续到末尾
+  assert.deepEqual(Object.keys(alpha.trend_analysis),
+    ['regression_runs', 'persistent_regression_start_index',
+      'transient_regression_runs', 'attribution_transitions']);
+  assert.deepEqual(alpha.trend_analysis.regression_runs,
+    [{ start_index: 1, end_index: 1, extends_to_end: true }]);
+  assert.equal(alpha.trend_analysis.persistent_regression_start_index, 1);
+  assert.deepEqual(alpha.trend_analysis.transient_regression_runs, []);
+  assert.deepEqual(alpha.trend_analysis.attribution_transitions, [
+    { from_index: 0, to_index: 1,
+      from_factor: 'none', to_factor: 'central_tendency' },
+  ]);
+  // 持续段只含 index 1：三项取该候选百分比，central 与 tail 平手取 central
+  assert.deepEqual(alpha.case_attribution, {
+    central_tendency_percent: 20,
+    tail_latency_percent: 20,
+    variability_percent: 0,
+    dominant_factor: 'central_tendency',
+  });
 
   assert.equal(beta.candidates[0].index, 0);
   assert.equal(beta.candidates[0].candidate, 'b-c0.json');
@@ -117,46 +300,209 @@ test('系列成功：结构、字段顺序、固定 baseline、index 从 0 起�
     level: 0.95, lower_ns: -20, upper_ns: -20,
     lower_percent: -16.666667, upper_percent: -16.666667,
   });
-  assert.equal(beta.first_regression_index, null);
-
-  assert.deepEqual(result.suite_summary, {
-    total_cases: 2,
-    total_candidates: 3,
-    regression: 1,
-    improvement: 1,
-    no_material_change: 0,
-    not_significant: 1,
-    suite_decision: 'regression',
+  // beta：improvement 不算 regression -> 无任何段，case_attribution 四项 null
+  assert.deepEqual(beta.trend_analysis, {
+    regression_runs: [],
+    persistent_regression_start_index: null,
+    transient_regression_runs: [],
+    attribution_transitions: [],
+  });
+  assert.deepEqual(beta.case_attribution, {
+    central_tendency_percent: null,
+    tail_latency_percent: null,
+    variability_percent: null,
+    dominant_factor: null,
   });
 
-  // 归因聚合全部 3 个候选：mean/p95 百分比 [0,20,-16.666667] 中位 0；
-  // stddev 三项均为 0（两边零方差）-> 0；dominant_factor none。
-  assert.deepEqual(Object.keys(result.suite_attribution),
-    ['central_tendency_percent', 'tail_latency_percent',
-      'variability_percent', 'dominant_factor']);
-  assert.equal(result.suite_attribution.central_tendency_percent, 0);
-  assert.equal(result.suite_attribution.tail_latency_percent, 0);
-  assert.equal(result.suite_attribution.variability_percent, 0);
-  assert.equal(result.suite_attribution.dominant_factor, 'none');
+  // timeline_summary：alpha 持续、beta 无回归；起点按 case 序
+  assert.deepEqual(Object.keys(result.timeline_summary), [
+    'total_cases',
+    'cases_with_persistent_regression',
+    'cases_with_only_transient_regression',
+    'cases_without_regression',
+    'persistent_regression_start_indices',
+    'suite_dominant_factor',
+  ]);
+  assert.deepEqual(result.timeline_summary, {
+    total_cases: 2,
+    cases_with_persistent_regression: 1,
+    cases_with_only_transient_regression: 0,
+    cases_without_regression: 1,
+    persistent_regression_start_indices: [
+      { name: 'alpha', start_index: 1 },
+    ],
+    suite_dominant_factor: 'central_tendency',
+  });
 });
 
-test('first_regression_index 跳过前面的 improvement/非显著，取首个 regression', () => {
+test('暂态段恢复后再持续：兼有两类只计持续，case_attribution 只取持续段中位数', () => {
   const dir = tempDir();
   writeCollect(dir, 'base.json', [100, 100, 100]);
-  writeCollect(dir, 'c0.json', [80, 80, 80]);   // -20% improvement
-  writeCollect(dir, 'c1.json', [100, 100, 100]); // 持平不显著
-  writeCollect(dir, 'c2.json', [120, 120, 120]); // +20% regression
+  writeCollect(dir, 'c0.json', [120, 120, 120]); // reg 暂态
+  writeCollect(dir, 'c1.json', [100, 100, 100]); // 恢复
+  writeCollect(dir, 'c2.json', [120, 120, 120]); // 持续段起点
+  writeCollect(dir, 'c3.json', [130, 130, 130]);
   const manifest = writeManifest(dir, 'm.json', [
-    { name: 's', baseline: 'base.json', candidates: ['c0.json', 'c1.json', 'c2.json'] },
+    { name: 's', baseline: 'base.json',
+      candidates: ['c0.json', 'c1.json', 'c2.json', 'c3.json'] },
   ]);
   const out = path.join(dir, 'out.json');
   const r = runCli(['--manifest', manifest, '--output', out]);
   assert.equal(r.status, 0, r.stderr);
-  const result = readJson(out);
-  assert.deepEqual(result.cases[0].candidates.map((c) => c.decision),
-    ['improvement', 'not_significant', 'regression']);
-  assert.equal(result.cases[0].first_regression_index, 2);
-  assert.equal(result.suite_summary.suite_decision, 'regression');
+
+  const c = readJson(out).cases[0];
+  assert.deepEqual(c.trend_analysis.regression_runs, [
+    { start_index: 0, end_index: 0, extends_to_end: false },
+    { start_index: 2, end_index: 3, extends_to_end: true },
+  ]);
+  assert.equal(c.trend_analysis.persistent_regression_start_index, 2);
+  assert.deepEqual(c.trend_analysis.transient_regression_runs, [
+    { start_index: 0, end_index: 0, recovery_index: 1 },
+  ]);
+  // 持续段 [c2(+20%), c3(+30%)]：mean/p95 中位 25，stddev 0
+  assert.deepEqual(c.case_attribution, {
+    central_tendency_percent: 25,
+    tail_latency_percent: 25,
+    variability_percent: 0,
+    dominant_factor: 'central_tendency',
+  });
+  const summary = readJson(out).timeline_summary;
+  assert.deepEqual(summary, {
+    total_cases: 1,
+    cases_with_persistent_regression: 1,
+    cases_with_only_transient_regression: 0,
+    cases_without_regression: 0,
+    persistent_regression_start_indices: [{ name: 's', start_index: 2 }],
+    suite_dominant_factor: 'central_tendency',
+  });
+});
+
+test('仅暂态回归：recovery_index 为段后首个 index，起点写 null，归因为 null', () => {
+  const dir = tempDir();
+  writeCollect(dir, 'base.json', [100, 100, 100]);
+  writeCollect(dir, 'c0.json', [100, 100, 100]);
+  writeCollect(dir, 'c1.json', [120, 120, 120]);
+  writeCollect(dir, 'c2.json', [100, 100, 100]);
+  const manifest = writeManifest(dir, 'm.json', [
+    { name: 's', baseline: 'base.json',
+      candidates: ['c0.json', 'c1.json', 'c2.json'] },
+  ]);
+  const out = path.join(dir, 'out.json');
+  const r = runCli(['--manifest', manifest, '--output', out]);
+  assert.equal(r.status, 0, r.stderr);
+
+  const c = readJson(out).cases[0];
+  assert.deepEqual(c.trend_analysis, {
+    regression_runs: [{ start_index: 1, end_index: 1, extends_to_end: false }],
+    persistent_regression_start_index: null,
+    transient_regression_runs: [
+      { start_index: 1, end_index: 1, recovery_index: 2 },
+    ],
+    attribution_transitions: [
+      { from_index: 0, to_index: 1,
+        from_factor: 'none', to_factor: 'central_tendency' },
+      { from_index: 1, to_index: 2,
+        from_factor: 'central_tendency', to_factor: 'none' },
+    ],
+  });
+  assert.deepEqual(c.case_attribution, {
+    central_tendency_percent: null,
+    tail_latency_percent: null,
+    variability_percent: null,
+    dominant_factor: null,
+  });
+  const summary = readJson(out).timeline_summary;
+  assert.equal(summary.cases_with_persistent_regression, 0);
+  assert.equal(summary.cases_with_only_transient_regression, 1);
+  assert.equal(summary.cases_without_regression, 0);
+  assert.deepEqual(summary.persistent_regression_start_indices, []);
+  assert.equal(summary.suite_dominant_factor, 'none');
+});
+
+test('attribution_transitions 记录非 regression 相邻候选的 factor 变化（none 双向）', () => {
+  const dir = tempDir();
+  // 零方差：持平 p=1 none；+3% 显著但未达 5% -> no_material_change，
+  // 归因 central_tendency；再持平。全程无 regression。
+  writeCollect(dir, 'base.json', [100, 100]);
+  writeCollect(dir, 'c0.json', [100, 100]);
+  writeCollect(dir, 'c1.json', [103, 103]);
+  writeCollect(dir, 'c2.json', [100, 100]);
+  const manifest = writeManifest(dir, 'm.json', [
+    { name: 's', baseline: 'base.json',
+      candidates: ['c0.json', 'c1.json', 'c2.json'] },
+  ]);
+  const out = path.join(dir, 'out.json');
+  const r = runCli(['--manifest', manifest, '--output', out]);
+  assert.equal(r.status, 0, r.stderr);
+
+  const c = readJson(out).cases[0];
+  assert.deepEqual(c.candidates.map((x) => x.decision),
+    ['not_significant', 'no_material_change', 'not_significant']);
+  assert.deepEqual(c.trend_analysis.regression_runs, []);
+  assert.equal(c.trend_analysis.persistent_regression_start_index, null);
+  assert.deepEqual(c.trend_analysis.transient_regression_runs, []);
+  assert.deepEqual(c.trend_analysis.attribution_transitions, [
+    { from_index: 0, to_index: 1,
+      from_factor: 'none', to_factor: 'central_tendency' },
+    { from_index: 1, to_index: 2,
+      from_factor: 'central_tendency', to_factor: 'none' },
+  ]);
+  const summary = readJson(out).timeline_summary;
+  assert.equal(summary.cases_without_regression, 1);
+  assert.equal(summary.suite_dominant_factor, 'none');
+});
+
+test('多 case：起点按 case 序，suite_dominant_factor 多数决与平手顺序', () => {
+  const dir = tempDir();
+  // alpha：持续，central_tendency（零方差整体平移，mean/p95 同幅平手取 central）
+  writeCollect(dir, 'a-base.json', [100, 100, 100]);
+  writeCollect(dir, 'a-c0.json', [120, 120, 120]);
+  // beta：持续，variability 占优（基线零方差，候选出现散布 -> stddev 百分比 null=正无穷）
+  writeCollect(dir, 'b-base.json', [100, 100, 100]);
+  writeCollect(dir, 'b-c0.json', [120, 120, 124]);
+  // gamma：无回归
+  writeCollect(dir, 'g-base.json', [100, 100, 100]);
+  writeCollect(dir, 'g-c0.json', [100, 100, 100]);
+
+  const run = (cases) => {
+    const m = writeManifest(dir, `m-${Math.random()}.json`, cases);
+    const o = path.join(dir, `o-${Math.random()}.json`);
+    const rr = runCli(['--manifest', m, '--output', o]);
+    assert.equal(rr.status, 0, rr.stderr);
+    return readJson(o);
+  };
+
+  const cases = [
+    { name: 'alpha', baseline: 'a-base.json', candidates: ['a-c0.json'] },
+    { name: 'beta', baseline: 'b-base.json', candidates: ['b-c0.json'] },
+    { name: 'gamma', baseline: 'g-base.json', candidates: ['g-c0.json'] },
+  ];
+  const result = run(cases);
+  const [alpha, beta, gamma] = result.cases;
+  assert.equal(alpha.candidates[0].decision, 'regression');
+  assert.equal(alpha.case_attribution.dominant_factor, 'central_tendency');
+  assert.equal(beta.candidates[0].decision, 'regression');
+  assert.equal(beta.case_attribution.dominant_factor, 'variability');
+  assert.equal(gamma.case_attribution.dominant_factor, null);
+
+  const summary = result.timeline_summary;
+  assert.equal(summary.total_cases, 3);
+  assert.equal(summary.cases_with_persistent_regression, 2);
+  assert.equal(summary.cases_with_only_transient_regression, 0);
+  assert.equal(summary.cases_without_regression, 1);
+  assert.deepEqual(summary.persistent_regression_start_indices, [
+    { name: 'alpha', start_index: 0 },
+    { name: 'beta', start_index: 0 },
+  ]);
+  // central 与 variability 各一票平手 -> 按顺序 central_tendency
+  assert.equal(summary.suite_dominant_factor, 'central_tendency');
+
+  // variability 两票对 central 一票 -> 多数决为 variability
+  const majority = run([
+    cases[0], cases[1],
+    { name: 'beta2', baseline: 'b-base.json', candidates: ['b-c0.json'] },
+  ]);
+  assert.equal(majority.timeline_summary.suite_dominant_factor, 'variability');
 });
 
 test('全部候选跨 case 统一 BH（区别于逐 case 校正）', () => {
@@ -197,75 +543,32 @@ test('全部候选跨 case 统一 BH（区别于逐 case 校正）', () => {
   for (const c of g.candidates) {
     assert.equal(c.decision, 'not_significant');
   }
-  assert.equal(g.first_regression_index, null);
+  assert.equal(g.trend_analysis.persistent_regression_start_index, null);
+  assert.deepEqual(g.trend_analysis.regression_runs, []);
+  assert.deepEqual(g.trend_analysis.transient_regression_runs, []);
+  assert.deepEqual(g.case_attribution, {
+    central_tendency_percent: null,
+    tail_latency_percent: null,
+    variability_percent: null,
+    dominant_factor: null,
+  });
 
   const h = result.cases[1];
   assert.equal(h.candidates[0].adjusted_p_value, globalAdjusted[3]);
   assert.equal(h.candidates[0].adjusted_p_value, 0);
   assert.equal(h.candidates[0].decision, 'regression');
-  assert.equal(h.first_regression_index, 0);
+  assert.deepEqual(h.trend_analysis.regression_runs,
+    [{ start_index: 0, end_index: 0, extends_to_end: true }]);
+  assert.equal(h.trend_analysis.persistent_regression_start_index, 0);
 
-  assert.deepEqual(result.suite_summary, {
+  assert.deepEqual(result.timeline_summary, {
     total_cases: 2,
-    total_candidates: 4,
-    regression: 1,
-    improvement: 0,
-    no_material_change: 0,
-    not_significant: 3,
-    suite_decision: 'regression',
+    cases_with_persistent_regression: 1,
+    cases_with_only_transient_regression: 0,
+    cases_without_regression: 1,
+    persistent_regression_start_indices: [{ name: 'h', start_index: 0 }],
+    suite_dominant_factor: 'central_tendency',
   });
-});
-
-test('suite_decision 优先级：regression > improvement > no_material_change > not_significant', () => {
-  const dir = tempDir();
-  const mk = (name, base, cands) => {
-    writeCollect(dir, `${name}-b.json`, base);
-    cands.forEach((d, i) => writeCollect(dir, `${name}-c${i}.json`, d));
-    return { name, baseline: `${name}-b.json`,
-      candidates: cands.map((_, i) => `${name}-c${i}.json`) };
-  };
-  const flat = [70, 70];
-  const reg = mk('reg', [100, 100, 100], [[120, 120, 120]]);
-  const imp = mk('imp', [120, 120, 120], [[100, 100, 100]]);
-  const same = mk('same', flat, [[70, 70]]);
-  const nmc = mk('nmc', [100, 100], [[103, 103]]); // +3% 显著但未达默认 5%
-
-  const run = (cases) => {
-    const m = writeManifest(dir, `m-${Math.random()}.json`, cases);
-    const o = path.join(dir, `o-${Math.random()}.json`);
-    const rr = runCli(['--manifest', m, '--output', o]);
-    assert.equal(rr.status, 0, rr.stderr);
-    return readJson(o).suite_summary.suite_decision;
-  };
-  assert.equal(run([imp, same, reg]), 'regression');
-  assert.equal(run([same, imp]), 'improvement');
-  assert.equal(run([same, nmc]), 'no_material_change');
-  assert.equal(run([same]), 'not_significant');
-});
-
-test('suite_attribution 聚合全部候选：中位数、null 正无穷与 dominant_factor', () => {
-  const dir = tempDir();
-  // case1 两候选：+100% 与 0%
-  writeCollect(dir, 'c1-b.json', [50, 100, 150]);
-  writeCollect(dir, 'c1-c0.json', [100, 200, 300]);
-  writeCollect(dir, 'c1-c1.json', [50, 100, 150]);
-  // case2 一个候选：基线 0 候选非 0 -> mean/p95 百分比 null（正无穷）
-  writeCollect(dir, 'c2-b.json', [0, 0, 0]);
-  writeCollect(dir, 'c2-c0.json', [5, 5, 5]);
-  const manifest = writeManifest(dir, 'm.json', [
-    { name: 'c1', baseline: 'c1-b.json', candidates: ['c1-c0.json', 'c1-c1.json'] },
-    { name: 'c2', baseline: 'c2-b.json', candidates: ['c2-c0.json'] },
-  ]);
-  const out = path.join(dir, 'out.json');
-  const r = runCli(['--manifest', manifest, '--output', out]);
-  assert.equal(r.status, 0, r.stderr);
-  const result = readJson(out);
-  // mean 百分比 [100, 0, null] 排序 [0,100,Inf] -> 中位 100
-  assert.equal(result.suite_attribution.central_tendency_percent, 100);
-  assert.equal(result.suite_attribution.tail_latency_percent, 100);
-  // stddev：c1-c0 +100%，c1-c1 0%，c2-c0 两边零方差 0% -> 中位 0
-  assert.equal(result.suite_attribution.variability_percent, 0);
-  assert.equal(result.suite_attribution.dominant_factor, 'central_tendency');
 });
 
 test('相对路径按 manifest 所在目录解析，且各 case command 可不同', () => {
@@ -289,8 +592,12 @@ test('相对路径按 manifest 所在目录解析，且各 case command 可不�
   assert.deepEqual(result.cases.map((c) => c.command), ['true', 'false']);
   assert.equal(result.cases[0].candidates[0].decision, 'regression');
   assert.equal(result.cases[1].candidates[0].decision, 'regression');
-  assert.equal(result.suite_summary.total_cases, 2);
-  assert.equal(result.suite_summary.total_candidates, 2);
+  assert.deepEqual(result.timeline_summary.persistent_regression_start_indices, [
+    { name: 'a', start_index: 0 },
+    { name: 'b', start_index: 0 },
+  ]);
+  assert.equal(result.timeline_summary.total_cases, 2);
+  assert.equal(result.timeline_summary.cases_with_persistent_regression, 2);
 });
 
 test('--key=value 形式与默认/自定义 alpha、min-change-percent', () => {
@@ -303,15 +610,20 @@ test('--key=value 形式与默认/自定义 alpha、min-change-percent', () => {
   const out1 = path.join(dir, 'out1.json');
   const r1 = runCli([`--manifest=${manifest}`, `--output=${out1}`]);
   assert.equal(r1.status, 0, r1.stderr);
-  assert.equal(readJson(out1).cases[0].candidates[0].decision, 'no_material_change');
-  assert.equal(readJson(out1).cases[0].first_regression_index, null);
+  const res1 = readJson(out1);
+  assert.equal(res1.cases[0].candidates[0].decision, 'no_material_change');
+  assert.equal(res1.cases[0].trend_analysis.persistent_regression_start_index, null);
+  assert.deepEqual(res1.cases[0].trend_analysis.regression_runs, []);
 
   const out2 = path.join(dir, 'out2.json');
   const r2 = runCli(['--manifest', manifest, '--output', out2,
     '--min-change-percent=2']);
   assert.equal(r2.status, 0, r2.stderr);
-  assert.equal(readJson(out2).cases[0].candidates[0].decision, 'regression');
-  assert.equal(readJson(out2).cases[0].first_regression_index, 0);
+  const res2 = readJson(out2);
+  assert.equal(res2.cases[0].candidates[0].decision, 'regression');
+  assert.deepEqual(res2.cases[0].trend_analysis.regression_runs,
+    [{ start_index: 0, end_index: 0, extends_to_end: true }]);
+  assert.equal(res2.cases[0].trend_analysis.persistent_regression_start_index, 0);
 });
 
 test('collect errors（非 0 退出样本）不参与统计', () => {
@@ -476,6 +788,6 @@ test('既有子命令行为不受影响（compare-suite 冒烟）', () => {
   const result = readJson(out);
   assert.deepEqual(Object.keys(result), ['cases', 'suite_summary', 'suite_attribution']);
   assert.equal(result.cases[0].decision, 'regression');
-  assert.equal('total_cases' in result.suite_summary, false);
-  assert.equal('candidates' in result.cases[0], false);
+  assert.equal('timeline_summary' in result, false);
+  assert.equal('trend_analysis' in result.cases[0], false);
 });

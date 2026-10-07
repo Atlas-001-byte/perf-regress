@@ -285,8 +285,9 @@ manifest、case、字段、路径、文件或输入样本不合上述口径时�
 
 按 manifest 为每个 case 固定一条 baseline，对其有序候选序列逐个按 compare
 口径重算，全部候选（跨所有 case）的原始 p 值统一做一次
-Benjamini–Hochberg（BH）多重比较校正，输出逐 case 的候选结果、回归起点、
-套件汇总与套件归因，用于定位候选序列相对固定 baseline 的回归起点。
+Benjamini–Hochberg（BH）多重比较校正，输出逐 case 的候选结果、连续回归段
+（持续/暂态）与归因变迁、持续段归因，以及套件时间线汇总，用于定位候选序列
+相对固定 baseline 的回归起点与演变过程。
 
 - `--manifest`：系列 manifest JSON（UTF-8），必填，非空。
 - `--output`：系列结果 JSON 输出文件，必填，非空。
@@ -312,10 +313,10 @@ collect 报告的 errors 不参与统计。成功退出码 0；结果序列化�
 
 ### 输出 JSON（UTF-8）
 
-顶层固定字段：`cases`、`suite_summary`、`suite_attribution`。
+顶层固定字段：`cases`、`timeline_summary`。
 
 - `cases`：按 manifest 顺序排列，每项含 `name`、`command`、`baseline_summary`、
-  `candidates`、`first_regression_index`。
+  `candidates`、`trend_analysis`、`case_attribution`。
   - `baseline_summary`：固定 baseline 按 collect summary 七项口径重算的结果；
   - `candidates`：与 manifest `candidates` 同序，每项在 compare-suite case
     输出的统计字段上增加 `candidate`、`index`，字段顺序为 `candidate`、`index`、
@@ -326,22 +327,49 @@ collect 报告的 errors 不参与统计。成功退出码 0；结果序列化�
     delta、归因口径与 compare 完全一致，baseline 为该 case 的固定 baseline；
     每个候选的 `delta.mean.confidence_interval` 定义也与 compare 完全相同，
     `level = 1 - alpha`；alpha 只影响该区间，不影响 p 值、BH 校正、
-    `decision`、`first_regression_index`、`suite_summary` 或
-    `suite_attribution`；
+    `decision`、`trend_analysis`、`case_attribution` 或 `timeline_summary`；
   - `adjusted_p_value`：对全部候选的原始 p 值统一按 compare-suite 的 BH
     口径校正（m 为全部候选总数）后映回各候选，保留六位小数；
   - `decision`：沿用 compare 四类值，以 `adjusted_p_value <= alpha` 判显著，
     再按 mean 百分比与阈值选择；
-  - `first_regression_index`：候选序列中首个 `decision` 为 `regression`
-    的 `index`；没有任何 regression 时为 `null`。
-- `suite_summary`：含 `total_cases`、`total_candidates` 与四类计数
-  （`regression`、`improvement`、`no_material_change`、`not_significant`，
-  统计全部候选）及 `suite_decision`；`suite_decision` 按优先级取候选 decision：
-  `regression` > `improvement` > `no_material_change` > `not_significant`。
-- `suite_attribution`：聚合全部候选（跨所有 case），口径与 compare-suite
-  完全一致：三个百分比取各候选对应归因百分比的中位数，`null` 按正无穷参与
-  比较，中位数为正无穷时写 `null`；`dominant_factor` 按 compare 归因顺序
-  取三个中位数中的最大正值，平手按该顺序，无正值为 `none`。
+  - `trend_analysis`：按候选序列 `index` 顺序分析连续 regression
+    （`decision` 为 `regression`）段，含四个字段：
+    - `regression_runs`：每个连续 regression 段一项，按出现顺序排列，含
+      `start_index`、`end_index`、`extends_to_end`；段末候选恰为序列最后一个
+      候选（`end_index` 为最大 index）时 `extends_to_end` 为 `true`，
+      每个 case 至多一段；没有 regression 段时为 `[]`；
+    - `persistent_regression_start_index`：仅当存在 `extends_to_end` 为
+      `true` 的段时写该段的 `start_index`，否则为 `null`；
+    - `transient_regression_runs`：除持续到末尾段之外的其余 regression 段，
+      按出现顺序排列，每项含 `start_index`、`end_index`、`recovery_index`；
+      `recovery_index` 为该段之后的首个候选 index（即 `end_index + 1`，
+      该候选 `decision` 不为 `regression`）；没有暂态段时为 `[]`；
+    - `attribution_transitions`：按 `index` 顺序列出相邻候选
+      `attribution.dominant_factor` 发生变化的位置，每项含 `from_index`、
+      `to_index`、`from_factor`、`to_factor`；与 `none` 之间的双向变化也计入；
+      没有变化（含候选少于 2 个）时为 `[]`。
+  - `case_attribution`：持续段（`extends_to_end` 为 `true` 的 regression 段）
+    内各候选的归因汇总，含 `central_tendency_percent`、
+    `tail_latency_percent`、`variability_percent`、`dominant_factor`；
+    三个百分比分别取段内候选对应 compare 归因百分比的中位数，`null` 按正无穷
+    参与比较、中位数为正无穷时写 `null`（口径同 compare-suite）；
+    `dominant_factor` 取三个中位数中的最大正值，平手按
+    `central_tendency`、`tail_latency`、`variability`、`none` 的顺序，
+    无正值为 `none`。该 case 无持续段（`persistent_regression_start_index`
+    为 `null`）时四项均为 `null`。
+- `timeline_summary`：套件时间线汇总，固定按以下顺序含
+  - `total_cases`：case 总数；
+  - `cases_with_persistent_regression`：存在持续到末尾 regression 段的 case 数；
+  - `cases_with_only_transient_regression`：无持续段但有暂态 regression 段的
+    case 数；
+  - `cases_without_regression`：没有任何 regression 段的 case 数；
+    兼有暂态段与持续段的 case 只计入持续，三类计数互斥且合计为 `total_cases`；
+  - `persistent_regression_start_indices`：按 `cases` 顺序列出所有持续段，
+    每项为 `{name, start_index}`；没有持续段时为 `[]`；
+  - `suite_dominant_factor`：只看各 case 非 `null` 的
+    `case_attribution.dominant_factor`（`none` 也是一个有效值），取出现次数
+    最多者；平手按 `central_tendency`、`tail_latency`、`variability`、`none`
+    的顺序；没有任何非 `null` 值（全部 case 无持续段）时为 `none`。
 
 ## ab 子命令
 
