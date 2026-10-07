@@ -16,7 +16,8 @@
 `perf-regress ab-suite`、配对交错 A/B 子命令
 `perf-regress ab-paired`、多场景配对交错 A/B 套件子命令
 `perf-regress ab-paired-suite`，以及回归分组归因子命令
-`perf-regress attribute`（零依赖 Node.js）。
+`perf-regress attribute`、TOST 等价检验子命令
+`perf-regress equivalence`（零依赖 Node.js）。
 
 ## 用法
 
@@ -40,6 +41,13 @@ node bin/perf-regress.js compare \
   --output <比较结果.json> \
   [--alpha <显著性水平>] \
   [--min-change-percent <阈值百分比>]
+
+node bin/perf-regress.js equivalence \
+  --baseline <基线.json> \
+  --candidate <候选.json> \
+  --output <等价检验结果.json> \
+  [--margin-percent <界值百分比>] \
+  [--alpha <显著性水平>]
 
 node bin/perf-regress.js compare-suite \
   --manifest <manifest.json> \
@@ -235,6 +243,54 @@ stdout/stderr、samples/summary/errors 字段口径均与 collect 相同。
   `dominant_factor` 取三者中最大正向项（`central_tendency` / `tail_latency` /
   `variability`），平手按此顺序，百分比为 `null` 视为无穷大正向，
   无正向值为 `none`。
+
+## equivalence 子命令
+
+对两份 collect JSON 做 TOST（两个单侧检验）等价检验，区分"不显著"与
+"统计等价"：compare 的 `not_significant` 只说明没有检测到差异，equivalence
+则在差异落在对称界值 ±margin 内且两个单侧检验都显著时判定等价。
+equivalence 不采用 compare 的 regression/improvement 判定，也不改变
+`not_significant` 的语义；既有子命令行为不受影响。
+
+- `--baseline` / `--candidate`：两份 collect 输出 JSON，必填。
+- `--output`：等价检验结果 JSON 输出文件，必填。
+- `--margin-percent`：等价界值（基线均值的百分比），`> 0`，缺省 `5`。
+- `--alpha`：显著性水平，`0 < alpha < 1`，缺省 `0.05`。
+
+输入校验与 compare 一致（`unit` 为 `"ns"`、两份 `command` 一致、只取
+`exit_code` 为 0 且 `duration_ns` 为非负安全整数的样本、每侧至少 2 个），
+另要求基线均值为正（margin 以其为基准），否则输入无效。校验失败时 stderr
+输出一条原因、退出码 2，不创建或改写 `--output`；成功退出码 0；
+`--output` 写入失败退出码 4。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`baseline_summary`、`candidate_summary`、`delta`、`margin`、
+`equivalence_test`、`decision`。
+
+- `baseline_summary` / `candidate_summary`：与 collect summary 相同的七项。
+- `delta`：仅含 `mean`，含 `ns`（候选均值减基线均值）、`percent`（相对基线
+  均值百分比）与 `confidence_interval`；区间为差值的**双侧 `1 - 2*alpha`**
+  Welch 区间（与两个 alpha 水平的单侧检验对偶），字段与 compare 的
+  `confidence_interval` 相同（`level`、`lower_ns`、`upper_ns`、
+  `lower_percent`、`upper_percent`），数值保留六位小数。
+- `margin`：等价界值，含 `ns`（基线均值 × `--margin-percent` / 100）与
+  `percent`（即 `--margin-percent`）。
+- `equivalence_test`：TOST 两个单侧 Welch 检验，自由度沿用 Welch
+  （(v1/n1 + v2/n2)² / ((v1/n1)²/(n1-1) + (v2/n2)²/(n2-1))）：
+  - `lower`：检验差值高于 −margin，`t_statistic = (差值 + margin) / 标准误`，
+    `p_value` 取右尾；
+  - `upper`：检验差值低于 +margin，`t_statistic = (差值 − margin) / 标准误`，
+    `p_value` 取左尾；
+  - 两侧方差均为 0 的退化情形：差值严格在界内时两个 `p_value` 均为 0；
+    差值恰等于某侧边界时该侧 `p_value` 为 1（`t_statistic` 为 0）；
+    越界时按方向取 0 或 1；退化时 `degrees_of_freedom` 为 `null`，
+    非零分子对应的 `t_statistic` 为 `null`。
+- `decision`：四选一 —
+  - `equivalent`：两个 `p_value` 均 `<= alpha`；
+  - `above_margin`：`1 - upper.p_value <= alpha`（差值显著高于正 margin）；
+  - `below_margin`：`1 - lower.p_value <= alpha`（差值显著低于负 margin）；
+  - `inconclusive`：其余情形。
 
 ## attribute 子命令
 

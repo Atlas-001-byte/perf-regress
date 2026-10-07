@@ -4,6 +4,7 @@
 const { collect, EXIT_USAGE } = require('../lib/collect');
 const { collectSuite } = require('../lib/collect-suite');
 const { compare } = require('../lib/compare');
+const { equivalence } = require('../lib/equivalence');
 const { compareSuite } = require('../lib/compare-suite');
 const { compareSeries } = require('../lib/compare-series');
 const { ab } = require('../lib/ab');
@@ -17,6 +18,8 @@ const USAGE = `Usage: perf-regress collect --command <cmd> --runs <n> --warmup <
        perf-regress collect-suite --manifest <path> --output <path>
        perf-regress compare --baseline <path> --candidate <path> --output <path> \
 [--alpha <a>] [--min-change-percent <p>]
+       perf-regress equivalence --baseline <path> --candidate <path> --output <path> \
+[--margin-percent <p>] [--alpha <a>]
        perf-regress attribute --request <path> --output <path>
        perf-regress compare-suite --manifest <path> --output <path> \
 [--alpha <a>] [--min-change-percent <p>]
@@ -36,6 +39,7 @@ const USAGE = `Usage: perf-regress collect --command <cmd> --runs <n> --warmup <
 collect：顺序执行目标命令进行基准采集，结果以 UTF-8 JSON 写入 --output。
 collect-suite：按 manifest 顺序批量采集多个基准场景，含逐 case 结果与套件汇总。
 compare：比较两份 collect JSON，输出显著性、回归判定与变化归因。
+equivalence：对两份 collect JSON 做 TOST 等价检验，区分不显著与统计等价。
 attribute：对一次已判定为回归的比较，按分类维度给出样本分组级回归归因。
 compare-suite：按 manifest 批量比较多对 collect JSON，含 BH 校正与套件级汇总。
 compare-series：定位每个 case 的候选序列相对固定 baseline 的回归起点，
@@ -65,6 +69,13 @@ compare 选项：
   --output <path>              比较结果 JSON 输出文件，必填
   --alpha <a>                  显著性水平，0 < a < 1，缺省 0.05
   --min-change-percent <p>     回归/改进判定阈值（百分比），>= 0，缺省 5
+
+equivalence 选项：
+  --baseline <path>            基线 collect JSON，必填
+  --candidate <path>           候选 collect JSON，必填
+  --output <path>              等价检验结果 JSON 输出文件，必填
+  --margin-percent <p>         等价界值（基线均值的百分比），> 0，缺省 5
+  --alpha <a>                  显著性水平，0 < a < 1，缺省 0.05
 
 attribute 选项：
   --request <path>             归因请求 JSON（含 metric、comparison、samples），必填
@@ -117,7 +128,8 @@ ab-paired-suite 选项：
 退出码：
   0  成功
   2  参数错误或输入无效（collect/collect-suite/ab/ab-suite/ab-paired/ab-paired-suite 含进程无法启动；
-     attribute 含归因输入非法 InvalidAttributionInputError；不创建或改写 output）
+     equivalence 含基线均值非正；attribute 含归因输入非法 InvalidAttributionInputError；
+     不创建或改写 output）
   3  collect/collect-suite：measure 阶段存在被跳过的异常（仍写 output）；
      ab/ab-suite：存在 measure 错误或任一侧有效样本少于 2（仍写 output）；
      ab-paired/ab-paired-suite：存在 measure 错误或完整 pairs 少于 2（仍写 output）
@@ -134,6 +146,7 @@ async function main() {
 
   if (subcommand !== 'collect' && subcommand !== 'collect-suite'
     && subcommand !== 'compare'
+    && subcommand !== 'equivalence'
     && subcommand !== 'compare-suite'
     && subcommand !== 'compare-series'
     && subcommand !== 'ab'
@@ -153,6 +166,7 @@ async function main() {
   const code = subcommand === 'collect' ? await collect(rest)
     : subcommand === 'collect-suite' ? await collectSuite(rest)
       : subcommand === 'compare' ? await compare(rest)
+        : subcommand === 'equivalence' ? await equivalence(rest)
         : subcommand === 'compare-suite' ? await compareSuite(rest)
           : subcommand === 'compare-series' ? await compareSeries(rest)
             : subcommand === 'ab' ? await ab(rest)
