@@ -9,6 +9,7 @@ const { compareSeries } = require('../lib/compare-series');
 const { ab } = require('../lib/ab');
 const { abSuite } = require('../lib/ab-suite');
 const { abPaired } = require('../lib/ab-paired');
+const { abPairedSuite } = require('../lib/ab-paired-suite');
 
 const USAGE = `Usage: perf-regress collect --command <cmd> --runs <n> --warmup <n> \
 --timeout-ms <ms> --output <path>
@@ -27,6 +28,8 @@ const USAGE = `Usage: perf-regress collect --command <cmd> --runs <n> --warmup <
        perf-regress ab-paired --baseline-command <cmd> --candidate-command <cmd> \
 --runs <n> --warmup <n> --timeout-ms <ms> --output <path> \
 [--alpha <a>] [--min-change-percent <p>]
+       perf-regress ab-paired-suite --manifest <path> --output <path> \
+[--alpha <a>] [--min-change-percent <p>]
 
 collect：顺序执行目标命令进行基准采集，结果以 UTF-8 JSON 写入 --output。
 collect-suite：按 manifest 顺序批量采集多个基准场景，含逐 case 结果与套件汇总。
@@ -39,6 +42,8 @@ ab：基线与候选同批交替测量（先全部预热再测量，每轮先 ba
 ab-suite：按 manifest 串行执行多个交错 A/B 场景，含 BH 校正、套件汇总与归因。
 ab-paired：与 ab 相同的交错执行，同轮两侧均退出 0 才配成一对，
     对逐对差值（候选减基线）做配对 t 检验、均值差区间与回归判定。
+ab-paired-suite：按 manifest 串行执行多个配对交错 A/B 场景，跨可比较 case
+    统一 BH 校正，含套件汇总与归因。
 
 collect 选项：
   --command <cmd>     被测命令（通过 /bin/sh -c 执行），必填
@@ -96,12 +101,19 @@ ab-paired 选项：
   --alpha <a>                  显著性水平，0 < a < 1，缺省 0.05
   --min-change-percent <p>     回归/改进判定阈值（百分比），>= 0，缺省 5
 
+ab-paired-suite 选项：
+  --manifest <path>            套件 manifest JSON（含非空 cases），必填
+  --output <path>              套件结果 JSON 输出文件，必填
+  --alpha <a>                  显著性水平，0 < a < 1，缺省 0.05
+  --min-change-percent <p>     回归/改进判定阈值（百分比），>= 0，缺省 5
+
 退出码：
   0  成功
-  2  参数错误或输入无效（collect/collect-suite/ab/ab-suite/ab-paired 含进程无法启动；不创建或改写 output）
+  2  参数错误或输入无效（collect/collect-suite/ab/ab-suite/ab-paired/ab-paired-suite 含进程无法启动；不创建或改写 output）
   3  collect/collect-suite：measure 阶段存在被跳过的异常（仍写 output）；
      ab/ab-suite：存在 measure 错误或任一侧有效样本少于 2（仍写 output）；
-     ab-paired：存在 measure 错误或完整 pairs 少于 2（仍写 output）
+     ab-paired：存在 measure 错误或完整 pairs 少于 2（仍写 output）；
+     ab-paired-suite：存在 measure 错误或任一 case 完整 pairs 少于 2（仍写 output）
   4  output 写入失败
 `;
 
@@ -119,7 +131,8 @@ async function main() {
     && subcommand !== 'compare-series'
     && subcommand !== 'ab'
     && subcommand !== 'ab-suite'
-    && subcommand !== 'ab-paired') {
+    && subcommand !== 'ab-paired'
+    && subcommand !== 'ab-paired-suite') {
     process.stderr.write(`perf-regress: 未知子命令: ${subcommand}\n\n${USAGE}`);
     process.exit(EXIT_USAGE);
   }
@@ -136,7 +149,8 @@ async function main() {
           : subcommand === 'compare-series' ? await compareSeries(rest)
             : subcommand === 'ab' ? await ab(rest)
               : subcommand === 'ab-suite' ? await abSuite(rest)
-                : await abPaired(rest);
+                : subcommand === 'ab-paired' ? await abPaired(rest)
+                  : await abPairedSuite(rest);
   process.exit(code);
 }
 

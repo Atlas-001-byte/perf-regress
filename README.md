@@ -14,7 +14,8 @@
 `perf-regress compare-series`，以及交错 A/B 采集与即时比较子命令
 `perf-regress ab`、多场景交错 A/B 套件子命令
 `perf-regress ab-suite`、配对交错 A/B 子命令
-`perf-regress ab-paired`（零依赖 Node.js）。
+`perf-regress ab-paired`、多场景配对交错 A/B 套件子命令
+`perf-regress ab-paired-suite`（零依赖 Node.js）。
 
 ## 用法
 
@@ -74,6 +75,12 @@ node bin/perf-regress.js ab-paired \
   --warmup <预热次数> \
   --timeout-ms <单次超时毫秒> \
   --output <结果.json> \
+  [--alpha <显著性水平>] \
+  [--min-change-percent <阈值百分比>]
+
+node bin/perf-regress.js ab-paired-suite \
+  --manifest <manifest.json> \
+  --output <套件结果.json> \
   [--alpha <显著性水平>] \
   [--min-change-percent <阈值百分比>]
 ```
@@ -508,6 +515,81 @@ candidate，全程串行，输出丢弃），但比较时按轮次配对——�
   - 完整 pairs 少于 2 时 `t_test`、`confidence_interval`、`decision`
     均为 `null`（`summary.count` 仍为完整对数）；无任何完整对时
     `attribution` 三项百分比均为 `null`、`dominant_factor` 为 `none`。
+
+## ab-paired-suite 子命令
+
+多场景配对交错 A/B：按 manifest 顺序串行执行多个 ab-paired 场景，逐 case
+沿用 ab-paired 的执行与配对口径（先两侧全部预热，再逐轮先 baseline 后
+candidate，全程串行，输出丢弃；同轮两侧均退出 0 才构成一对），并对具可比性
+（完整 pairs >= 2）的 case 统一做 Benjamini–Hochberg（BH）多重比较校正，
+输出逐 case 结果、套件汇总与套件归因。
+
+- `--manifest`：套件 manifest JSON（UTF-8），必填，非空。
+- `--output`：套件结果 JSON 输出文件，必填，非空。
+- `--alpha`：显著性水平，`0 < alpha < 1`，缺省 `0.05`。
+- `--min-change-percent`：回归/改进判定的变化幅度阈值（百分比），`>= 0`，缺省 `5`。
+- 参数同时支持 `--key value` 与 `--key=value` 两种写法。
+
+### manifest 格式（UTF-8 JSON）
+
+与 ab-suite 完全相同：顶层为对象，`cases` 为非空数组，每项必须含：
+
+- `name`：非空字符串，在 cases 中唯一；
+- `baseline_command` / `candidate_command`：基线/候选命令，经系统 shell
+  执行，非空字符串；
+- `runs`：每侧计入统计的执行次数，整数且 `>= 2`；
+- `warmup`：每侧预热次数，整数且 `>= 0`；
+- `timeout_ms`：单次执行超时毫秒数，整数且 `>= 1`。
+
+未知字段一律忽略。执行前完整校验：参数、manifest、命令不合上述口径，或
+spawn 失败、shell 126/127 时 stderr 输出一条原因、退出码 2，不创建或改写
+`--output`（即使此前已有 case 执行完成）。
+
+### 执行与错误口径
+
+- case 按 manifest 顺序串行，case 间不并发；
+- warmup 的 nonzero_exit/timeout 只记入该侧 `errors`；
+- measure 的 nonzero_exit/timeout 跳过该次并记入 `errors`，继续剩余测量；
+- 单侧异常不影响另一侧、后续轮次与后续 case；
+- 进程无法启动（spawn 失败或 shell 126/127）属致命错误：stderr 报告启动失败、
+  退出码 2，不创建或改写 `--output`；
+- 存在普通测量错误，或任一 case 完整 pairs 少于 2 时，写完整 JSON 并退出 3；
+  否则退出 0；`--output` 写入失败退出码 4。
+
+### 输出 JSON（UTF-8）
+
+顶层固定字段：`cases`、`suite_summary`、`suite_attribution`。
+
+- `cases`：按 manifest 顺序排列，每项字段为 `name`、`baseline`、`candidate`、
+  `paired`、`adjusted_p_value`、`decision`；`baseline`/`candidate` 与
+  ab-paired 完全一致。
+  - `paired` 与 ab-paired 输出口径完全一致（`pairs`、`summary`、`t_test`、
+    `confidence_interval`、`decision`、`attribution`），其内部 `decision`
+    以原始配对 p 值按 ab-paired 口径判定，`confidence_interval` 的
+    `level = 1 - alpha`；alpha 只影响该区间，不改变原始 p 值、BH 校正、
+    顶层 `decision`、`suite_summary`、`suite_attribution`；
+  - `adjusted_p_value`：仅对完整 pairs >= 2 的 case 的原始配对 p 值，按
+    compare-suite 的 BH 口径跨这些可比较 case 统一校正（保留六位小数）；
+    pairs < 2 的 case 为 `null`；
+  - 顶层 `decision`：以 `adjusted_p_value <= alpha` 判显著，再按成对 mean
+    百分比与 `--min-change-percent` 选择四类 decision；pairs < 2 的 case
+    为 `null`；
+  - pairs < 2 时仍写 `paired`（含 `pairs` 与 `summary.count`），但
+    `t_test`、`confidence_interval`、`paired.decision` 为 `null`；无任何
+    完整对时 `paired.attribution` 三项百分比为 `null`、`dominant_factor`
+    为 `none`。
+- `suite_summary`：字段与 compare-suite 一致，含 `total` 与四类计数
+  （`regression`、`improvement`、`no_material_change`、
+  `not_significant`，只统计可比较 case）及 `suite_decision`；
+  `suite_decision` 按优先级
+  `regression` > `improvement` > `no_material_change` > `not_significant`；
+  全部 case 不可比较时为 `incomplete`。
+- `suite_attribution`：只汇总可比较 case，口径与 compare-suite 完全一致：
+  三个百分比取各 case `paired.attribution` 对应百分比的中位数
+  （`null` 按正无穷参与比较，中位数为正无穷时写 `null`），
+  `dominant_factor` 取三个中位数中的最大正值，平手按
+  central_tendency / tail_latency / variability 顺序，无正值为 `none`；
+  没有可比较 case 时三项百分比均为 `null`、`dominant_factor` 为 `none`。
 
 ## 约定
 
