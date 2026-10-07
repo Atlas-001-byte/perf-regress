@@ -286,7 +286,8 @@ manifest、case、字段、路径、文件或输入样本不合上述口径时�
 按 manifest 为每个 case 固定一条 baseline，对其有序候选序列逐个按 compare
 口径重算，全部候选（跨所有 case）的原始 p 值统一做一次
 Benjamini–Hochberg（BH）多重比较校正，输出逐 case 的候选结果、回归起点、
-套件汇总与套件归因，用于定位候选序列相对固定 baseline 的回归起点。
+候选序列趋势分析、套件汇总、套件归因与跨 case 时间线汇总，用于定位候选
+序列相对固定 baseline 的回归起点及其持续/暂态形态。
 
 - `--manifest`：系列 manifest JSON（UTF-8），必填，非空。
 - `--output`：系列结果 JSON 输出文件，必填，非空。
@@ -312,10 +313,10 @@ collect 报告的 errors 不参与统计。成功退出码 0；结果序列化�
 
 ### 输出 JSON（UTF-8）
 
-顶层固定字段：`cases`、`suite_summary`、`suite_attribution`。
+顶层固定字段：`cases`、`suite_summary`、`suite_attribution`、`timeline_summary`。
 
 - `cases`：按 manifest 顺序排列，每项含 `name`、`command`、`baseline_summary`、
-  `candidates`、`first_regression_index`。
+  `candidates`、`first_regression_index`、`trend_analysis`。
   - `baseline_summary`：固定 baseline 按 collect summary 七项口径重算的结果；
   - `candidates`：与 manifest `candidates` 同序，每项在 compare-suite case
     输出的统计字段上增加 `candidate`、`index`，字段顺序为 `candidate`、`index`、
@@ -334,6 +335,26 @@ collect 报告的 errors 不参与统计。成功退出码 0；结果序列化�
     再按 mean 百分比与阈值选择；
   - `first_regression_index`：候选序列中首个 `decision` 为 `regression`
     的 `index`；没有任何 regression 时为 `null`。
+  - `trend_analysis`：该 case 候选序列的趋势分析，固定含
+    `regression_runs`、`persistent_regression_start_index`、
+    `transient_regression_runs`、`attribution_transitions`、`case_attribution`。
+    - `regression_runs`：候选序列中连续 `regression` 的最大段，按序列顺序
+      排列，每段依次含 `start_index`、`end_index`、`extends_to_end`
+      （`end_index` 是否为序列最后一个 `index`）；无 regression 时为 `[]`；
+    - `persistent_regression_start_index`：`extends_to_end` 为 `true` 的段
+      （持续段，至多一个）的 `start_index`；无持续段时为 `null`；
+    - `transient_regression_runs`：其余（未延伸到末尾的）段，每项含
+      `start_index`、`end_index`、`recovery_index`（段后首个 `index`，
+      即 `end_index + 1`）；无暂态段时为 `[]`；
+    - `attribution_transitions`：相邻候选 `attribution.dominant_factor`
+      发生变化的列表，每项含 `from_index`、`to_index`、`from_factor`、
+      `to_factor`（`none` 与其他因子间的双向变化均计入）；无变化时为 `[]`；
+    - `case_attribution`：有持续段时，取该段各候选归因百分比
+      （`central_tendency_percent`、`tail_latency_percent`、
+      `variability_percent`）的中位数（`null` 按正无穷参与比较，中位数为
+      正无穷时写 `null`），`dominant_factor` 取三个中位数中的最大正值，
+      平手按 central_tendency / tail_latency / variability 顺序，
+      无正值为 `none`；无持续段时四项均为 `null`。
 - `suite_summary`：含 `total_cases`、`total_candidates` 与四类计数
   （`regression`、`improvement`、`no_material_change`、`not_significant`，
   统计全部候选）及 `suite_decision`；`suite_decision` 按优先级取候选 decision：
@@ -342,6 +363,20 @@ collect 报告的 errors 不参与统计。成功退出码 0；结果序列化�
   完全一致：三个百分比取各候选对应归因百分比的中位数，`null` 按正无穷参与
   比较，中位数为正无穷时写 `null`；`dominant_factor` 按 compare 归因顺序
   取三个中位数中的最大正值，平手按该顺序，无正值为 `none`。
+- `timeline_summary`：跨 case 的时间线汇总，固定含
+  - `total_cases`：case 总数；
+  - `cases_with_persistent_regression`：有持续段（`extends_to_end` 的
+    regression 段）的 case 数；兼有持续段与暂态段的 case 只计入本类；
+  - `cases_with_only_transient_regression`：有 regression 段但无持续段的
+    case 数；
+  - `cases_without_regression`：没有任何 regression 段的 case 数；
+  - `persistent_regression_start_indices`：按 case 顺序列出有持续段的
+    case，每项含 `name`、`start_index`（即该 case 的
+    `persistent_regression_start_index`）；
+  - `suite_dominant_factor`：取各 case `case_attribution.dominant_factor`
+    非 `null` 值中频次最高者，平手按
+    central_tendency / tail_latency / variability / none 顺序；
+    没有任何非 `null` 值时为 `none`。
 
 ## ab 子命令
 
